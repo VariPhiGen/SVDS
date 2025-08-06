@@ -1,0 +1,77 @@
+{
+    "sensor_id": "your-sensor-id-here",
+    "default_arguments": {
+        "hef_path": "/path/to/your/model.hef",
+        "labels-json": "None"
+    },
+    "available_activities": ["traffic_overspeeding_distancewise"],
+    "active_activities": ["traffic_overspeeding_distancewise"],
+    "kafka_variables": {
+        "bootstrap_servers": [
+            "your-primary-broker:9092",
+            "your-secondary-broker:9092"
+        ],
+        "primary_broker": "your-primary-broker:9092",
+        "secondary_broker": "your-secondary-broker:9092",
+        "broker_failover_timeout": 30,
+        "send_analytics_pipeline": "aianalytics",
+        "send_events_pipeline": "aievents",
+        "log_topic": "log_topic",
+        "reset_threshold": 3000,
+        "AWS_S3": {
+            "primary": {
+                "aws_access_key_id": "",
+                "aws_secret_access_key": "",
+                "region_name": "your-region",
+                "BUCKET_NAME": ""
+            },
+            "secondary": {
+                "aws_access_key_id": "",
+                "aws_secret_access_key": "",
+                "region_name": "your-region",
+                "BUCKET_NAME": ""
+            },
+            "s3_failover_timeout": 30,
+            "upload_retries": 3
+        }
+    },
+    "radar_config": {
+        "port": "/dev/ttyACM0",
+        "baudrate": 9600,
+        "max_age": 20,
+        "max_diff_rais": 15
+    },
+    "camera_details": {
+        "RTSP_URL": "rtsp://username:password@camera-ip:554/stream",
+        "camera_ip": "your-camera-ip",
+        "username": "",
+        "password": "",
+        "IF_USB_CAMERA": "False",
+        "USB_CAM_INPUT": ""
+    },
+    "activities_data": {
+        "traffic_overspeeding_distancewise": {
+            "zones": {
+                "zone1": [[212,510],[2223,482],[2240,903],[33,936]]
+            },
+            "parameters": {
+                "real_distance": 10,
+                "speed_limit": {
+                    "car": 20,
+                    "truck": 20,
+                    "motorcycle": 20
+                },
+                "calibration": 1.3668,
+                "radar_calibration": 1,
+                "lines": {
+                    "lane1": [[1439,409],[1187,992]]
+                }
+            }
+        }
+    },
+    "save_settings": {
+        "save_snapshots": 1,
+        "save_rtsp_images": 1
+    },
+    "calibration_required": 2
+} 
