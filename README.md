@@ -48,11 +48,16 @@ Variphi-SVDS/
 ### Quick Setup
 ```bash
 # Clone the repository
-git clone https://github.com/Variphi/svds-system.git
-cd svds-system
+git clone https://github.com/VariPhiGen/SVDS.git
+cd SVDS
 
+
+# Setup system environment
+source setup_system.sh
 # Run installation
 ./install.sh
+
+
 ```
 
 ### Custom Installation
@@ -66,6 +71,22 @@ cd svds-system
 # Install all resources
 ./install.sh --all
 ```
+
+### System Environment Setup
+After installation, set up the system environment:
+```bash
+# Setup system environment variables and paths
+source setup_system.sh
+
+# Or run the setup script directly
+./setup_system.sh
+```
+
+**Note**: The `setup_system.sh` script configures:
+- Environment variables for Hailo hardware
+- Python path configurations
+- GStreamer plugin paths
+- System dependencies and permissions
 
 ## ⚙️ Configuration
 
