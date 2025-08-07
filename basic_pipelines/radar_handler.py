@@ -2,7 +2,7 @@ import serial
 import time
 from collections import deque
 from threading import Thread, Lock
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 
 class RadarHandler:
@@ -10,7 +10,7 @@ class RadarHandler:
     
     def __init__(self):
         """Initialize radar handler."""
-        self.radar_data = deque(maxlen=2)  # Dictionary to store radar data for each tracked object
+        self.radar_data = deque(maxlen=5)  # Dictionary to store radar data for each tracked object
         self.radar_port = None  # Serial port for radar
         self.radar_baudrate = 9600  # Default baudrate
         self.radar_thread = None
@@ -18,6 +18,8 @@ class RadarHandler:
         self.radar_lock = Lock()  # Lock for thread-safe radar data access
         self.count_radar = 0  # Count radar until it will become 0 again
         self.rank1_radar_speeds = []
+        self.rank2_radar_speeds = []
+        self.rank3_radar_speeds = []
         self.ser = None
         self.is_calibrating={}
         
@@ -165,7 +167,6 @@ class RadarHandler:
                         
                         # Parse the radar data
                         try:
-                            self.radar_data.append(speed)
                             if previous_reading is not None:
                                 if abs(speed - previous_reading) > 4:
                                     self.count_radar = 0
@@ -179,6 +180,16 @@ class RadarHandler:
                                     self.rank1_radar_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if (current_time - ts) < self.max_age]
                                     self.rank1_radar_speeds.append((time.time(), speed))
                                     print(self.rank1_radar_speeds)
+                                elif self.count_radar == 2:
+                                    current_time = time.time()
+                                    self.rank2_radar_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if (current_time - ts) < self.max_age]
+                                    self.rank2_radar_speeds.append((time.time(), speed))
+                                    print(self.rank2_radar_speeds)
+                                elif self.count_radar == 3:
+                                    current_time = time.time()
+                                    self.rank3_radar_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if (current_time - ts) < self.max_age]
+                                    self.rank3_radar_speeds.append((time.time(), speed))
+                                    print(self.rank3_radar_speeds)
                                     # Debug info removed - can be added back if needed
                                 # Debug info removed - can be added back if needed
                                 print("Actual Radar Running Speed",speed, self.count_radar)
@@ -188,8 +199,6 @@ class RadarHandler:
                             if hasattr(self, 'error_logger') and self.error_logger:
                                 self.error_logger(f"Error parsing radar data: {e}")
                             continue
-                    else:
-                        time.sleep(0.01)
                             
                 except serial.SerialException as e:
                     if hasattr(self, 'error_logger') and self.error_logger:
@@ -199,32 +208,74 @@ class RadarHandler:
         except serial.SerialException as e:
             if hasattr(self, 'error_logger') and self.error_logger:
                 self.error_logger(f"Failed to open radar serial port: {e}")
-            
-    def get_radar_data(self, ai_speed, threshold,obj_class):
+        
+    def get_radar_speed(self, ai_speed,threshold, obj_class):
+        """
+        Optimized radar speed matching with early exit and cleaner logic
+        """
         with self.radar_lock:
-            self.rank1_radar_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if speed > threshold]
-            if not self.rank1_radar_speeds:
+            # Early exit if no radar data available
+            if not any([self.rank1_radar_speeds, self.rank2_radar_speeds, self.rank3_radar_speeds]):
                 return None
-
+            
+            # Filter speeds above threshold once
+            min_speed = threshold - 5
+            
+            # Process calibration mode
             if self.is_calibrating[obj_class]:
-                # During calibration, just return the closest available speed
-                best_match = min(self.rank1_radar_speeds, key=lambda x: abs(x[1] - ai_speed))
-                if self.class_calibration_count[obj_class] <= self.calibration_required:
-                    self.class_calibration_count[obj_class] += 1
-                    print(f"Calibration for {obj_class}: {self.class_calibration_count[obj_class]}/{self.calibration_required} done.")
-                else:
-                    self.stop_calbirating(obj_class)
-                self.rank1_radar_speeds.remove(best_match)
-                return best_match[1]
+                return self._handle_calibration_mode(ai_speed, obj_class, min_speed)
+            
+            # Normal mode: try each rank in order
+            return self._get_best_match_from_ranks(ai_speed, min_speed)
 
-            # Normal logic: filter within ±margin
-            candidates = [
-                (ts, rs) for ts, rs in self.rank1_radar_speeds
-                if abs(rs - ai_speed) < self.max_diff_rais
-            ]
-            if not candidates:
-                return None
-            # Pick the candidate with the earliest timestamp
-            best_match = min(candidates, key=lambda x: x[0])
-            self.rank1_radar_speeds.remove(best_match)
-            return best_match[1] 
+    def _handle_calibration_mode(self, ai_speed, obj_class, min_speed):
+        """
+        Handle calibration mode with early exit
+        """
+        # Filter rank1 speeds once
+        valid_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if speed > min_speed]
+        
+        if not valid_speeds:
+            return None
+        
+        # Find best match
+        best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
+        
+        # Update calibration count
+        if self.class_calibration_count[obj_class] <= self.calibration_required:
+            self.class_calibration_count[obj_class] += 1
+            print(f"Calibration for {obj_class}: {self.class_calibration_count[obj_class]}/{self.calibration_required} done.")
+        else:
+            self.stop_calbirating(obj_class)
+        
+        # Remove used speed and return
+        self.rank1_radar_speeds.remove(best_match)
+        return best_match[1]
+
+    def _get_best_match_from_ranks(self, ai_speed, min_speed):
+        """
+        Get best match from available ranks with early exit
+        """
+        # Define ranks to check in order of priority
+        rank_configs = [
+            (self.rank1_radar_speeds, 'rank1'),
+            (self.rank2_radar_speeds, 'rank2'), 
+            (self.rank3_radar_speeds, 'rank3')
+        ]
+        
+        for radar_speeds, rank_name in rank_configs:
+            # Filter speeds above threshold
+            valid_speeds = [(ts, speed) for ts, speed in radar_speeds if speed > min_speed]
+            
+            if valid_speeds:
+                # Get earliest timestamp (best match)
+                best_match = min(valid_speeds, key=lambda x: x[0])
+                
+                # Remove used speed
+                radar_speeds.remove(best_match)
+                
+                return best_match[1]
+        
+        # No valid speeds found in any rank
+        return None
+        

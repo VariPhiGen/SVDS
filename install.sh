@@ -293,7 +293,7 @@ pip install --upgrade pip setuptools wheel
 pip install "py>=1.8.0"
 
 
-pip install -r requirements.txt
+pip install -r requirements.txt --break-system-packages
 echo $"📦 Installing Hailo-Apps-Infra… $HAILO_INFRA_PATH"
 if [[ "$HAILO_INFRA_PATH" != "auto" ]]; then
   echo "📦 Installing Hailo-Apps-Infra from $HAILO_INFRA_PATH…"

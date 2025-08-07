@@ -286,12 +286,13 @@ class user_app_callback_class(app_callback_class):
                     if vehicle_path[0][1] > vehicle_path[1][1]:
                         projected_distance, total_distance, lane_name = closest_line_projected_distance(vehicle_path, self.parameters_data["traffic_overspeeding_distancewise"]["lines"])
                         
-                        if total_distance > 0.2 * self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]:
-                            distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * total_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
+                        if projected_distance > 0.6 * self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]:
+                            distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             
                             speed = float(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])) * float(self.calibrate_class_wise[obj_class])
                             radar_speed = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
                             print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
+                            
                             if radar_speed is not None and speed != 0:
                                 self.calibrate_speed["speed"] = speed
                                 self.calibrate_speed["class_name"] = obj_class
@@ -415,8 +416,6 @@ def app_callback(pad, info, user_data,frame_type):
 
             for method in user_data.active_methods:
                 method()
-
-
 
     return Gst.PadProbeReturn.OK
 

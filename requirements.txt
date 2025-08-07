@@ -29,6 +29,7 @@ pytest-asyncio
 
 # Optional: Additional Computer Vision
 pillow>=8.0.0
+shapely
 
 # Optional: Web Framework (if using FastAPI endpoints)
 # fastapi>=0.68.0
