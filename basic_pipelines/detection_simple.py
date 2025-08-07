@@ -13,7 +13,7 @@ class user_app_callback_class(app_callback_class):
         super().__init__()
 
 # User-defined callback function: This is the callback function that will be called when data is available from the pipeline
-def app_callback(pad, info, user_data):
+def app_callback(pad, info, user_data,frame_type):
     user_data.increment()  # Using the user_data to count the number of frames
     string_to_print = f"Frame count: {user_data.get_count()}\n"
     buffer = info.get_buffer()  # Get the GstBuffer from the probe info
