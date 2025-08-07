@@ -17,25 +17,29 @@ class RadarHandler:
         self.radar_running = False
         self.radar_lock = Lock()  # Lock for thread-safe radar data access
         self.count_radar = 0  # Count radar until it will become 0 again
-        self.rank1_radar_speeds = []
-        self.rank2_radar_speeds = []
-        self.rank3_radar_speeds = []
+        # Use deques for better performance with time-series data
+        self.rank1_radar_speeds = deque()
+        self.rank2_radar_speeds = deque()
+        self.rank3_radar_speeds = deque()
         self.ser = None
-        self.is_calibrating={}
+        self.is_calibrating = {}
         
-    def init_radar(self, port: str, baudrate: int = 9600,max_age=10, max_diff_rais=15,calibration_required=2):
+    def init_radar(self, port: str, baudrate: int = 9600, max_age=10, max_diff_rais=15, calibration_required=2):
         """
         Initialize radar connection parameters.
         
         Args:
             port: Serial port for radar connection
             baudrate: Baud rate for serial communication
+            max_age: Maximum age of speed readings in seconds
+            max_diff_rais: Maximum difference between consecutive readings
+            calibration_required: Number of calibration readings required
         """
         self.radar_port = port
         self.radar_baudrate = baudrate
         self.max_age = max_age
         self.max_diff_rais = max_diff_rais
-        self.calibration_required = calibration_required  # Will be set from config
+        self.calibration_required = calibration_required
         self.class_calibration_count = {}  # Track calibration count per class
         self.ser = None
         self._connect()
@@ -165,34 +169,31 @@ class RadarHandler:
                         direction = speed_data['direction']
                         target_type = speed_data['type']   
                         
-                        # Parse the radar data
+                        # Parse the radar data with thread safety
                         try:
-                            if previous_reading is not None:
-                                if abs(speed - previous_reading) > 4:
-                                    self.count_radar = 0
+                            
+                            # Reset counter if speed difference is too large
+                            if previous_reading is not None and abs(speed - previous_reading) > self.max_diff_rais:
+                                self.count_radar = 0
                             
                             previous_reading = speed
-                                
+                            
                             if speed != 0:
                                 self.count_radar += 1
+                                current_time = time.time()
+                                
+                                # Process based on count
                                 if self.count_radar == 1:
-                                    current_time = time.time()
-                                    self.rank1_radar_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if (current_time - ts) < self.max_age]
-                                    self.rank1_radar_speeds.append((time.time(), speed))
-                                    print(self.rank1_radar_speeds)
-                                elif self.count_radar == 2:
-                                    current_time = time.time()
-                                    self.rank2_radar_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if (current_time - ts) < self.max_age]
-                                    self.rank2_radar_speeds.append((time.time(), speed))
-                                    print(self.rank2_radar_speeds)
-                                elif self.count_radar == 3:
-                                    current_time = time.time()
-                                    self.rank3_radar_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if (current_time - ts) < self.max_age]
-                                    self.rank3_radar_speeds.append((time.time(), speed))
-                                    print(self.rank3_radar_speeds)
-                                    # Debug info removed - can be added back if needed
-                                # Debug info removed - can be added back if needed
-                                print("Actual Radar Running Speed",speed, self.count_radar)
+                                    # First reading goes to rank1
+                                    self._add_speed_to_rank(speed, self.rank1_radar_speeds, current_time)
+                                    print(f"Rank1 speeds: {list(self.rank1_radar_speeds)}")
+                                elif self.count_radar % 2 == 0:
+                                    # Even readings go to rank2
+                                    self._add_speed_to_rank(speed, self.rank2_radar_speeds, current_time)
+                                    # Process rank2 to rank3 transfer
+                                    self._process_rank2_to_rank3()
+                                
+                                print(f"Actual Radar Running Speed: {speed}, Count: {self.count_radar}")
                             else:
                                 self.count_radar = 0
                         except (ValueError, IndexError) as e:
@@ -209,7 +210,7 @@ class RadarHandler:
             if hasattr(self, 'error_logger') and self.error_logger:
                 self.error_logger(f"Failed to open radar serial port: {e}")
         
-    def get_radar_speed(self, ai_speed,threshold, obj_class):
+    def get_radar_data(self, ai_speed,threshold, obj_class):
         """
         Optimized radar speed matching with early exit and cleaner logic
         """
@@ -232,7 +233,7 @@ class RadarHandler:
         """
         Handle calibration mode with early exit
         """
-        # Filter rank1 speeds once
+        # Filter rank1 speeds once - more efficient with list comprehension
         valid_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if speed > min_speed]
         
         if not valid_speeds:
@@ -264,7 +265,7 @@ class RadarHandler:
         ]
         
         for radar_speeds, rank_name in rank_configs:
-            # Filter speeds above threshold
+            # Filter speeds above threshold - more efficient with list comprehension
             valid_speeds = [(ts, speed) for ts, speed in radar_speeds if speed > min_speed]
             
             if valid_speeds:
@@ -278,4 +279,40 @@ class RadarHandler:
         
         # No valid speeds found in any rank
         return None
+        
+    def _cleanup_old_speeds(self, speed_deque: deque, current_time: float) -> None:
+        """
+        Remove old speed entries from a deque based on max_age.
+        
+        Args:
+            speed_deque: Deque containing (timestamp, speed) tuples
+            current_time: Current timestamp
+        """
+        while speed_deque and (current_time - speed_deque[0][0]) >= self.max_age:
+            speed_deque.popleft()
+    
+    def _add_speed_to_rank(self, speed: int, rank_deque: deque, current_time: float) -> None:
+        """
+        Add speed to a rank deque with cleanup.
+        
+        Args:
+            speed: Speed value to add
+            rank_deque: Target deque to add to
+            current_time: Current timestamp
+        """
+        self._cleanup_old_speeds(rank_deque, current_time)
+        rank_deque.append((current_time, speed))
+    
+    def _process_rank2_to_rank3(self) -> None:
+        """
+        Process rank2 speeds and move oldest to rank3 when rank2 has 2 entries.
+        """
+        if len(self.rank2_radar_speeds) >= 2:
+            # Move oldest speed from rank2 to rank3
+            oldest_speed = self.rank2_radar_speeds.popleft()
+            self.rank3_radar_speeds.append(oldest_speed)
+            
+            # Keep only the most recent entry in rank3
+            if len(self.rank3_radar_speeds) > 1:
+                self.rank3_radar_speeds.popleft()
         
