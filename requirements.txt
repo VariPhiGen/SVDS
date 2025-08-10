@@ -36,8 +36,8 @@ shapely
 # uvicorn[standard]>=0.15.0
 
 # Optional: Video Processing (if using ffmpeg)
-# ffmpeg-python
-# imageio
+ffmpeg-python>=0.2.0
+imageio>=2.9.0
 
 # Optional: Data Analysis
 # pandas>=1.3.0

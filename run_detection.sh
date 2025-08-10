@@ -87,6 +87,11 @@ run_detection() {
     local attempt=$1
     print_status "Attempt $attempt: Starting detection pipeline..."
     
+    # Change to SVDS directory
+    #cd SVDS || {
+    #    print_error "Failed to change to SVDS directory"
+    #    return 1
+    #}
     
     # Source the environment
     if [[ -f "setup_env.sh" ]]; then
@@ -99,7 +104,7 @@ run_detection() {
     
     # Run the detection pipeline
     print_status "Running: python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync --disable-display"
-    python basic_pipelines/detection.py --i "$RTSP_LINK" --disable-sync --disable-display
+    python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync --disable-display
 }
 
 # Function to get sleep delay

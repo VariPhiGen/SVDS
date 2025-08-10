@@ -8,7 +8,16 @@ from datetime import datetime
 from kafka import KafkaProducer
 from kafka.errors import KafkaError, NoBrokersAvailable
 from typing import Optional, Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from video_clipper import VideoClipRecorder
+from boto3.s3.transfer import TransferConfig
+
+# S3 Transfer configuration for multipart uploads (used for video files)
+S3_TRANSFER_CONFIG = TransferConfig(
+    multipart_threshold=5*1024*1024,  # 5MB
+    multipart_chunksize=5*1024*1024,
+    max_concurrency=4
+)
 
 
 class KafkaHandler:
@@ -27,6 +36,7 @@ class KafkaHandler:
         self.recorder = None
         self.last_error_time = 0
         self.error_interval = 300
+        self.executor = ThreadPoolExecutor(max_workers=3)
         
         # Dual broker redundancy settings
         self.brokers = self._get_broker_list()
@@ -103,7 +113,7 @@ class KafkaHandler:
     def _setup_video_recorder(self):
         """Initialize video recorder for frame buffering."""
         self.recorder = VideoClipRecorder(
-            maxlen=100,
+            maxlen=60,
             fps=20,
             prefix="clips"
         )
@@ -184,20 +194,22 @@ class KafkaHandler:
             return None
             
         try:
+            kafka_config = self.config.get("kafka_variables", {})
+            linger = int(kafka_config.get("linger_ms", 50))
+            batch = int(kafka_config.get("batch_size", 512*1024))
             producer = KafkaProducer(
                 bootstrap_servers=[broker],
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                
                 acks='1',
                 retries=3,
                 retry_backoff_ms=500,
                 compression_type='gzip',
-                batch_size=1048576,
+                batch_size=batch,
                 buffer_memory=67108864,
                 max_request_size=1048576,
                 request_timeout_ms=5000,
                 max_block_ms=1000,
-                linger_ms=1000
+                linger_ms=linger
             )
             
             producer.metrics()
@@ -253,7 +265,8 @@ class KafkaHandler:
                             io.BytesIO(file_bytes),
                             Bucket=config.get("BUCKET_NAME"),
                             Key=unique_filename,
-                            ExtraArgs={"ContentType": content_type}
+                            ExtraArgs={"ContentType": content_type},
+                            Config=S3_TRANSFER_CONFIG
                         )
                         # Return full S3 URL for videos
                         region = config.get("region_name")
@@ -282,48 +295,72 @@ class KafkaHandler:
             self.last_s3_failure = time.time()
                     
         return None
+    
+    def _upload_image(self, image_bytes: bytes) -> tuple[str, Optional[str]]:
+        """Upload image to S3."""
+        return ("org_img", self.upload_to_s3(image_bytes, "image") if image_bytes else None)
+    
+    def _upload_snapshot(self, snap_shot_bytes: bytes) -> tuple[str, Optional[str]]:
+        """Upload snapshot to S3 or return DISABLED if None."""
+        if snap_shot_bytes is None:
+            return ("snap_shot", "DISABLED")
+        return ("snap_shot", self.upload_to_s3(snap_shot_bytes, "snapshot") if snap_shot_bytes else None)
+    
+    def _upload_video(self, video_bytes: bytes) -> tuple[str, Optional[str]]:
+        """Upload video to S3."""
+        return ("video", self.upload_to_s3(video_bytes, "video") if video_bytes else None)
         
     def process_events_queue(self, events_queue: queue.Queue, topic: str) -> bool:
         """Process events from queue and send to Kafka with dual broker and S3 redundancy."""
         try:
-            message = events_queue.get_nowait()
+            message = events_queue.get(timeout=2)  # waits up to 2 seconds
             if message is None or topic == "None":
                 return True
                 
-            # Upload files to S3 with redundancy
+            # Upload files to S3 in parallel and allow partial success
             image_bytes = message.get("org_img")
-            image_s3_url = self.upload_to_s3(image_bytes, "image") if image_bytes else None
-            
             snap_shot_bytes = message.get("snap_shot")
-            snap_shot_s3_url = self.upload_to_s3(snap_shot_bytes, "snapshot") if snap_shot_bytes else None
-            
             video_bytes = message.get("video")
-            video_s3_url = self.upload_to_s3(video_bytes, "video") if video_bytes and len(video_bytes) > 0 else None
-                
-            # Update message with S3 URLs
+
+            uploads = {}
+            futures = [
+                self.executor.submit(self._upload_image, image_bytes),
+                self.executor.submit(self._upload_snapshot, snap_shot_bytes),
+                self.executor.submit(self._upload_video, video_bytes)
+            ]
+            for fut in as_completed(futures):
+                k, v = fut.result()
+                uploads[k] = v
+
+
             success = False
-            if image_s3_url and snap_shot_s3_url:
-                message["org_img"] = image_s3_url
-                message["snap_shot"] = snap_shot_s3_url
-                message["video"] = video_s3_url if video_s3_url else None
-                
-                # Send to Kafka with dual broker redundancy
-                if self.kafka_pipeline:
-                    try:
-                        self.kafka_pipeline.send(topic, message)
-                        self.kafka_pipeline.flush()
-                        success = True
-                    except (KafkaError, NoBrokersAvailable) as e:
-                        print(f"DEBUG: Kafka send failed: {e}")
-                        self._handle_broker_failure()
-                        if self.kafka_pipeline:
-                            try:
-                                self.kafka_pipeline.send(topic, message)
-                                self.kafka_pipeline.flush()
-                                success = True
-                            except:
-                                pass
-            
+            # Check if all required uploads succeeded (treat "DISABLED" as success for snap_shot)
+            uploads_successful = (
+                uploads.get("org_img") is not None and 
+                uploads.get("video") is not None and
+                (uploads.get("snap_shot") is not None or uploads.get("snap_shot") == "DISABLED")
+            )
+
+            # Update message with available S3 URLs
+            message["org_img"] = uploads.get("org_img")
+            # Set snap_shot to None if it was disabled, otherwise use the uploaded URL
+            message["snap_shot"] = None if uploads.get("snap_shot") == "DISABLED" else uploads.get("snap_shot")
+            message["video"] = uploads.get("video")
+
+            # Send to Kafka only if ALL uploads succeeded
+            if uploads_successful and self.kafka_pipeline:
+                try:
+                    self.kafka_pipeline.send(topic, message)
+                    success = True
+                except (KafkaError, NoBrokersAvailable):
+                    self._handle_broker_failure()
+                    if self.kafka_pipeline:
+                        try:
+                            self.kafka_pipeline.send(topic, message)
+                            success = True
+                        except Exception:
+                            pass
+
             return success
                 
         except queue.Empty:
@@ -407,8 +444,7 @@ class KafkaHandler:
         send_analytics_pipeline = kafka_config.get("send_analytics_pipeline")
         
         queues_and_topics = [
-            (events_queue, send_events_pipeline),
-            (analytics_queue, send_analytics_pipeline)
+            (events_queue, send_events_pipeline)
         ]
         
         consecutive_empty_cycles = 0

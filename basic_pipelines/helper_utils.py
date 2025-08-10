@@ -43,7 +43,7 @@ def encode_frame_to_base64(image: np.ndarray) -> str:
     return jpeg_as_text
 
 
-def encode_frame_to_bytes(image: np.ndarray, quality: int = 100, anpr: Optional[np.ndarray] = None) -> bytes:
+def encode_frame_to_bytes(image: np.ndarray, quality: int = 95) -> bytes:
     """
     Encode frame to bytes.
     
@@ -55,13 +55,12 @@ def encode_frame_to_bytes(image: np.ndarray, quality: int = 100, anpr: Optional[
     Returns:
         Image as bytes
     """
-    if anpr is None:
+    if quality < 100:
         # Convert from BGR to RGB
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
         _, buffer = cv2.imencode('.jpg', image, encode_param)
     else:
-        _, buffer = cv2.imencode('.png', anpr)
+        _, buffer = cv2.imencode('.jpg', image)
     return buffer.tobytes()
 
 
@@ -81,22 +80,51 @@ def is_vehicle_in_zone(anchor_point: Tuple[float, float], zone_polygon: Polygon)
     return zone_polygon.contains(vehicle_point)
 
 
-def crop_image_numpy(image_array: np.ndarray, bounding_box: Tuple[float, float, float, float]) -> np.ndarray:
+def crop_image_numpy(image_array: np.ndarray, bounding_box: Tuple[float, float, float, float], pad: int = 50) -> np.ndarray:
     """
-    Crops the image represented as a numpy array based on the provided bounding box.
+    Crop image safely with bounds checking and padding.
     
     Args:
-        image_array: The image as a numpy array
-        bounding_box: A tuple of (left, upper, right, lower) coordinates
-        
-    Returns:
-        Cropped image as numpy array
-    """
-    left, upper, right, lower = bounding_box
+        image_array: Image as numpy array (H, W, C)
+        bounding_box: (left, upper, right, lower)
+        pad: padding in pixels to extend the crop on all sides
     
-    # Crop the image using array slicing with padding
-    cropped_image = image_array[int(upper-20):int(lower+20), int(left-20):int(right+20)]
-    return cropped_image
+    Returns:
+        Cropped image as numpy array. Falls back to unclipped box or full image if invalid.
+    """
+    h, w = image_array.shape[:2]
+    left, upper, right, lower = bounding_box
+
+    # Normalize coordinates (ensure left<=right, upper<=lower)
+    x_min = min(left, right)
+    x_max = max(left, right)
+    y_min = min(upper, lower)
+    y_max = max(upper, lower)
+
+    # First try padded crop with clamping
+    x1 = max(0, int(x_min - pad))
+    y1 = max(0, int(y_min - pad))
+    x2 = min(w, int(x_max + pad))
+    y2 = min(h, int(y_max + pad))
+
+    if x2 > x1 and y2 > y1:
+        cropped = image_array[y1:y2, x1:x2]
+        if cropped.size > 0:
+            return cropped
+
+    # Fallback to unclipped, unpadded box within bounds
+    x1 = max(0, int(x_min))
+    y1 = max(0, int(y_min))
+    x2 = min(w, int(x_max))
+    y2 = min(h, int(y_max))
+
+    if x2 > x1 and y2 > y1:
+        cropped = image_array[y1:y2, x1:x2]
+        if cropped.size > 0:
+            return cropped
+
+    # Last resort: return the full frame to avoid empty crops
+    return image_array
 
 
 def find_clusters_by_zone(gathered_tracker_ids: Dict[str, List[Tuple[int, int]]]) -> Dict[str, List[List[int]]]:

@@ -38,8 +38,8 @@
     "radar_config": {
         "port": "/dev/ttyACM0",
         "baudrate": 9600,
-        "max_age": 20,
-        "max_diff_rais": 15
+        "max_age": 15,
+        "max_diff_rais": 12
     },
     "camera_details": {
         "RTSP_URL": "rtsp://username:password@camera-ip:554/stream",
@@ -70,8 +70,9 @@
         }
     },
     "save_settings": {
-        "save_snapshots": 1,
-        "save_rtsp_images": 1
+        "save_snapshots": 0,
+        "save_rtsp_images": 0,
+        "take_cgi_snapshots": 0
     },
     "calibration_required": 2
 } 

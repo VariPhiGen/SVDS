@@ -39,7 +39,7 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStrea
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
 # Initialize results queue
-results_analytics_queue = queue.Queue(maxsize=100)
+results_analytics_queue = queue.Queue(maxsize=1)
 results_events_queue = queue.Queue(maxsize=100)
 # Initialize a deque to store tracker_ids for the last n frames
 last_n_frames_tracker_ids = deque(maxlen=30)
@@ -72,13 +72,15 @@ class user_app_callback_class(app_callback_class):
         self.anchor_points_original = None
         self.ist_timezone = pytz.timezone('Asia/Kolkata')
         self.last_n_frame_tracker_ids = None
-        self.time_stamp = deque(maxlen=10)
+        self.time_stamp = deque(maxlen=4)
         self.cleaning_time_for_events = time.time()
 
         # Radar handler
         self.radar_handler = RadarHandler()
+        self.radar_maxdiff = None
         self.save_snapshots = None
         self.save_rtsp_images =None
+        self.take_cgi_snapshots = None
 
         # Traffic Overspeeding Distancewise Variables
         self.traffic_overspeeding_distancewise_data = None
@@ -102,7 +104,7 @@ class user_app_callback_class(app_callback_class):
         self.asyncio_thread = Thread(target=self.start_asyncio_loop, daemon=True)
         self.asyncio_thread.start()
         
-    def calibration_check(self):
+    def calibration_check(self,flag=False):
         """
         Compute a per-class calibration factor (radar_speed / ai_speed),
         store it in self.calibrate_class_wise and then clear calibration inputs.
@@ -120,32 +122,33 @@ class user_app_callback_class(app_callback_class):
             return  # invalid or missing data—nothing to do
 
         # Compute and store calibration factor
-        self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
+        if flag is True and abs(ai-rs)<self.radar_maxdiff:
+            self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
+        else:
+            self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
 
         # Reset input values efficiently
         # Use assignment to None
         cs["speed"] = cs["radar"] = cs["class_name"] = None
 
+        return True
         
     def start_asyncio_loop(self):
         asyncio.set_event_loop(self.main_loop)
         self.main_loop.run_forever()
         
-    async def trigger_snapshot_loop(self, xywh, class_name, sub_category, parameters, datetimestamp_trackerid, confidence=1, anprimage=None):
+    async def trigger_snapshot_loop(self, xywh, class_name, sub_category, parameters, datetimestamp, confidence=1, anprimage=None):
         # Run CPU-intensive operations in thread pool
         loop = asyncio.get_event_loop()
         
-        if sub_category == "Road Safety-Overspeeding":
+        cgi_snapshot = None
+        if sub_category == "Road Safety-Overspeeding" and hasattr(self, 'take_cgi_snapshots') and self.take_cgi_snapshots:
             try:
                 final_speed = parameters["speed"]
                 suffix = f"{class_name}_{final_speed}"
                 
                 # Run camera capture in thread pool
-                filename, cgi_snapshot = await loop.run_in_executor(
-                    self.thread_pool, 
-                    self.cam.capture, 
-                    str(suffix)
-                )
+                filename, cgi_snapshot = self.cam.capture(prefix=str(suffix))
                 
                 if hasattr(self, 'save_snapshots') and filename and cgi_snapshot:
                     # Run file operations in thread pool
@@ -169,13 +172,15 @@ class user_app_callback_class(app_callback_class):
         try:
             if anprimage is not None:
                 # Convert from BGR to RGB
+                print("running anpr image ")
                 anprimage_rgb = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
-                image = encode_frame_to_bytes(self.image, 100, anprimage_rgb)
+                image = encode_frame_to_bytes(anprimage_rgb, 100)
                 height, width = anprimage.shape[:2]
                 anpr_status = "True"
                     
             else:
-                image = encode_frame_to_bytes(self.image)
+                frame_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
+                image = encode_frame_to_bytes(frame_rgb)
                 height, width = self.image.shape[:2]
                 anpr_status = "False"
         
@@ -183,8 +188,10 @@ class user_app_callback_class(app_callback_class):
             # Save RTSP images only if enabled
             rtsp_image_path = None
             if hasattr(self, 'save_rtsp_images') and self.save_rtsp_images:
-                # Note: rtsp_image_path functionality moved to KafkaHandler
-                rtsp_image_path = self.recorder.save_images(anprimage_rgb, "/home/arresto/SVDS2/original_croppings/", suffix)
+                # Choose a valid BGR image: prefer cropped ANPR image if provided, else full frame
+                img_for_rtsp = anprimage_rgb if anprimage is not None else self.image
+                print("Trying to Save RTSP")
+                rtsp_image_path = self.recorder.save_images(img_for_rtsp, "/home/arresto/SVDS2/original_croppings/", suffix)
                 print(rtsp_image_path)
             
         except Exception as e:
@@ -198,7 +205,7 @@ class user_app_callback_class(app_callback_class):
             "snap_shot": cgi_snapshot,
             "video": video_bytes if video_bytes else None,
             "absolute_bbox": [{"xywh": xywh, "class_name": class_name, "confidence": confidence, "subcategory": sub_category, "parameters": parameters, "anpr": anpr_status}],
-            "datetimestamp_trackerid": datetimestamp_trackerid,
+            "datetimestamp": datetimestamp,
             "imgsz": f"{width}:{height}",
             "color": "#FFFF00"
         }
@@ -261,6 +268,7 @@ class user_app_callback_class(app_callback_class):
         overspeeding_result = []
         vehicle_index = [i for i, cls in enumerate(self.classes) if cls in self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"].keys()]
         count = 0
+        image=None
         # �� MOST CRITICAL: Add this early exit
         if not vehicle_index:
             return 
@@ -285,41 +293,43 @@ class user_app_callback_class(app_callback_class):
                     self.distancewise_tracking.remove(tracker_id)
                     if vehicle_path[0][1] > vehicle_path[1][1]:
                         projected_distance, total_distance, lane_name = closest_line_projected_distance(vehicle_path, self.parameters_data["traffic_overspeeding_distancewise"]["lines"])
-                        
-                        if projected_distance > 0.6 * self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]:
+                        print("Testing",projected_distance,total_distance,lane_name,self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
+                        if projected_distance > (0.2*self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]):
                             distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             
                             speed = float(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])) * float(self.calibrate_class_wise[obj_class])
                             radar_speed = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
                             print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
                             
-                            if radar_speed is not None and speed != 0:
+                            if radar_speed is not None and speed != 0 :
                                 self.calibrate_speed["speed"] = speed
                                 self.calibrate_speed["class_name"] = obj_class
                                 self.calibrate_speed["radar"] = radar_speed
-                                self.calibration_check()
-                                if obj_class not in self.calibrated_classes and self.radar_handler.is_calibrating[obj_class] is False:
+                                if obj_class not in self.calibrated_classes and self.calibration_check() and self.radar_handler.is_calibrating[obj_class] is False:
                                     self.calibrated_classes.add(obj_class)
+                                else:
+                                    self.calibration_check(True)
                             if obj_class in self.calibrated_classes:
+                                image=self.image
                                 overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
         
         for result in overspeeding_result:
             obj_class = result["obj_class"]
-            if result["radar_speed"] is not None and 120 >= result["radar_speed"] > self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]:
+            if result["radar_speed"] is not None and 120 >= result["radar_speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+2):
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
-                anprimage = crop_image_numpy(self.image, result["box"])
+                anprimage = crop_image_numpy(image, result["box"])
                 xywh = [0, 0, 100, 100]
-                datetimestamp_trackerid = f"{datetime.now(self.ist_timezone).isoformat()}_{result['tracker_id']}"
-                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["radar_speed"]}, datetimestamp_trackerid, 1, anprimage)
+                datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
+                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["radar_speed"]}, datetimestamp, 1, anprimage)
             
-            if 120 > result["speed"] > self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]] and result["radar_speed"] is None:
+            if 120 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+2) and result["radar_speed"] is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
-                anprimage = crop_image_numpy(self.image, result["box"])
+                anprimage = crop_image_numpy(image, result["box"])
                 xywh = [0, 0, 100, 100]
-                datetimestamp_trackerid = f"{datetime.now(self.ist_timezone).isoformat()}_{result['tracker_id']}"
-                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["speed"]}, datetimestamp_trackerid, 1, anprimage)
+                datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
+                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["speed"]}, datetimestamp, 1, anprimage)
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
@@ -352,15 +362,21 @@ def app_callback(pad, info, user_data,frame_type):
     else:
         # If the user_data.use_frame is set to True, we can get the video frame from the buffer
         frame = None
-        if user_data.use_frame and format is not None and width is not None and height is not None:
+        if format is not None and width is not None and height is not None:
+            buf_timestamp = buffer.pts  # nanoseconds
+            ts = buf_timestamp / Gst.SECOND
+            #print(ts)
+            user_data.time_stamp.append(ts)
             # Get video frame
             frame = get_numpy_from_buffer(buffer, format, width, height)
             user_data.recorder.add_frame(frame)
             
+            
         # Get the detections from the buffer
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
-        user_data.time_stamp.append(time.time())
+
+        #user_data.time_stamp.append(tr)
 
         # Parse the detections
         detection_count = 0
@@ -478,12 +494,13 @@ if __name__ == "__main__":
     save_settings = config.get("save_settings", {})
     user_data.save_snapshots = bool(save_settings.get("save_snapshots", 0))
     user_data.save_rtsp_images = bool(save_settings.get("save_rtsp_images", 0))
-    print(f"Save settings loaded from config: snapshots={user_data.save_snapshots}, rtsp_images={user_data.save_rtsp_images}")
-
+    user_data.take_cgi_snapshots = bool(save_settings.get("take_cgi_snapshots", 1))  # Default to True for backward compatibility
+    print(f"Save settings loaded from config: snapshots={user_data.save_snapshots}, rtsp_images={user_data.save_rtsp_images}, cgi_snapshots={user_data.take_cgi_snapshots}")
     # Initialize radar if configured
     if "radar_config" in config:
         try:
             radar_config = config["radar_config"]
+            user_data.radar_maxdiff=radar_config.get("max_diff_rais", 15)
             user_data.radar_handler.init_radar(
                 port=radar_config.get("port", "/dev/ttyACM0"),
                 baudrate=radar_config.get("baudrate", 9600),

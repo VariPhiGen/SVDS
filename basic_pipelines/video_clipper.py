@@ -4,10 +4,22 @@ import cv2
 import numpy as np
 from datetime import datetime
 from collections import deque
+from pathlib import Path
+import io
+import av
+import gc
+
+# Try to import ffmpeg, fallback to OpenCV if not available
+try:
+    import ffmpeg
+    FFMPEG_AVAILABLE = True
+except ImportError:
+    print("WARNING: ffmpeg-python not available, using OpenCV fallback for video encoding")
+    FFMPEG_AVAILABLE = False
 
 
 class VideoClipRecorder:
-    def __init__(self, maxlen=150, fps=20, prefix: str = "clips"):
+    def __init__(self, maxlen=60, fps=20, prefix: str = "clips"):
         """
         Initialize video recorder for frame buffering and video generation.
         
@@ -29,26 +41,63 @@ class VideoClipRecorder:
         except Exception as e:
             print(f"[ERROR] Failed to add frame to buffer: {e}")
 
-    def generate_video_bytes(self) -> bytes | None:
-        """Encode the buffered frames as an MP4 video in memory and return bytes."""
+    def generate_video_bytes(self, clear_after=True) -> bytes | None:
+        """
+        Memory-efficient in-memory MP4 (H.264 ultrafast) encoding.
+        Takes a snapshot of the deque to avoid frame changes during encoding.
+        """
         if not self.frame_buffer:
             return None
 
         try:
+            # Snapshot the current frames to avoid mid-encode changes
             frame_buffer_copy = [frame.copy() for frame in list(self.frame_buffer)]
-            height, width, _ = frame_buffer_copy[0].shape
-            fourcc = cv2.VideoWriter_fourcc(*'h264')
-            temp_path = f"/tmp/{uuid.uuid4()}_New.mp4"
+            h, w, _ = frame_buffer_copy[0].shape
 
-            writer = cv2.VideoWriter(temp_path, fourcc, self.fps, (width, height))
-            for frame in frame_buffer_copy:
-                writer.write(frame)
-            writer.release()
+            buf = io.BytesIO()
+            container = av.open(buf, mode='w', format='mp4')
 
-            with open(temp_path, 'rb') as f:
-                video_bytes = f.read()
+            stream = container.add_stream('libx264', rate=self.fps)
+            stream.width = w
+            stream.height = h
+            stream.pix_fmt = 'yuv420p'
 
-            os.remove(temp_path)
+            codec_ctx = stream.codec_context
+            codec_ctx.options = {
+                'preset': 'ultrafast',
+                'tune': 'zerolatency',
+                'profile': 'baseline',
+            }
+
+            for frame_bgr in frame_buffer_copy:
+                if frame_bgr.dtype != np.uint8:
+                    frame_bgr = frame_bgr.astype(np.uint8)
+                if not frame_bgr.flags['C_CONTIGUOUS']:
+                    frame_bgr = np.ascontiguousarray(frame_bgr)
+
+                #frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                video_frame = av.VideoFrame.from_ndarray(frame_bgr, format='rgb24')
+
+                for packet in stream.encode(video_frame):
+                    container.mux(packet)
+
+                del video_frame, packet
+
+            for packet in stream.encode():
+                container.mux(packet)
+
+            container.close()
+
+            buf.seek(0)
+            video_bytes = buf.read()
+            buf.close()
+
+            if clear_after:
+                self.frame_buffer.clear()
+
+            del container, stream, codec_ctx, frame_buffer_copy
+            gc.collect()
+
             return video_bytes
 
         except Exception as e:
@@ -60,7 +109,7 @@ class VideoClipRecorder:
         try:
             os.makedirs(save_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            org_path = os.path.join(save_dir, f"org_img_{timestamp}_{suffix}.png")
+            org_path = os.path.join(save_dir, f"org_img_{timestamp}_{suffix}.jpg")
 
             if not isinstance(org_img, np.ndarray):
                 raise TypeError(f"Expected numpy.ndarray, got {type(org_img)}")
@@ -72,6 +121,7 @@ class VideoClipRecorder:
                 org_img = np.ascontiguousarray(org_img)
 
             success = cv2.imwrite(org_path, org_img)
+            print("Success")
             if not success:
                 raise IOError(f"cv2.imwrite failed for image at {org_path}")
 

@@ -173,7 +173,7 @@ class RadarHandler:
                         try:
                             
                             # Reset counter if speed difference is too large
-                            if previous_reading is not None and abs(speed - previous_reading) > self.max_diff_rais:
+                            if previous_reading is not None and abs(speed - previous_reading) > 4:
                                 self.count_radar = 0
                             
                             previous_reading = speed
@@ -186,12 +186,15 @@ class RadarHandler:
                                 if self.count_radar == 1:
                                     # First reading goes to rank1
                                     self._add_speed_to_rank(speed, self.rank1_radar_speeds, current_time)
-                                    print(f"Rank1 speeds: {list(self.rank1_radar_speeds)}")
-                                elif self.count_radar % 2 == 0:
+                                    
+                                elif self.count_radar != 0:
                                     # Even readings go to rank2
-                                    self._add_speed_to_rank(speed, self.rank2_radar_speeds, current_time)
+                                    self._add_speed_to_rank(speed, self.rank3_radar_speeds, current_time)
                                     # Process rank2 to rank3 transfer
-                                    self._process_rank2_to_rank3()
+                                    self._process_rank3_to_rank2()
+                                    print(f"Rank1 speeds: {list(self.rank1_radar_speeds)}")
+                                    print(f"Rank2 speeds: {list(self.rank2_radar_speeds)}")
+                                    print(f"Rank3 speeds: {list(self.rank3_radar_speeds)}")
                                 
                                 print(f"Actual Radar Running Speed: {speed}, Count: {self.count_radar}")
                             else:
@@ -243,11 +246,12 @@ class RadarHandler:
         best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
         
         # Update calibration count
-        if self.class_calibration_count[obj_class] <= self.calibration_required:
+        if self.class_calibration_count[obj_class] < self.calibration_required:
             self.class_calibration_count[obj_class] += 1
             print(f"Calibration for {obj_class}: {self.class_calibration_count[obj_class]}/{self.calibration_required} done.")
         else:
             self.stop_calbirating(obj_class)
+            
         
         # Remove used speed and return
         self.rank1_radar_speeds.remove(best_match)
@@ -259,18 +263,21 @@ class RadarHandler:
         """
         # Define ranks to check in order of priority
         rank_configs = [
-            (self.rank1_radar_speeds, 'rank1'),
-            (self.rank2_radar_speeds, 'rank2'), 
-            (self.rank3_radar_speeds, 'rank3')
+            [self.rank1_radar_speeds, 'rank1'],
+            [self.rank2_radar_speeds, 'rank2'], 
+            [self.rank3_radar_speeds, 'rank3']
         ]
         
         for radar_speeds, rank_name in rank_configs:
             # Filter speeds above threshold - more efficient with list comprehension
-            valid_speeds = [(ts, speed) for ts, speed in radar_speeds if speed > min_speed]
-            
+            if rank_name is "rank1":
+                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if speed > min_speed]
+            else:
+                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if speed > min_speed and abs(speed-ai_speed) < self.max_diff_rais]
+            print(radar_speeds,rank_name)
             if valid_speeds:
                 # Get earliest timestamp (best match)
-                best_match = min(valid_speeds, key=lambda x: x[0])
+                best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
                 
                 # Remove used speed
                 radar_speeds.remove(best_match)
@@ -303,16 +310,16 @@ class RadarHandler:
         self._cleanup_old_speeds(rank_deque, current_time)
         rank_deque.append((current_time, speed))
     
-    def _process_rank2_to_rank3(self) -> None:
+    def _process_rank3_to_rank2(self) -> None:
         """
-        Process rank2 speeds and move oldest to rank3 when rank2 has 2 entries.
+        Process rank2 speeds and move oldest to rank2 when rank3 has 2 entries.
         """
-        if len(self.rank2_radar_speeds) >= 2:
-            # Move oldest speed from rank2 to rank3
-            oldest_speed = self.rank2_radar_speeds.popleft()
-            self.rank3_radar_speeds.append(oldest_speed)
+        if len(self.rank3_radar_speeds) >= 2:
+            # Move oldest speed from rank3 to rank2
+            oldest_speed = self.rank3_radar_speeds.popleft()
+            self.rank2_radar_speeds.append(oldest_speed)
             
             # Keep only the most recent entry in rank3
-            if len(self.rank3_radar_speeds) > 1:
-                self.rank3_radar_speeds.popleft()
+            if len(self.rank2_radar_speeds) > 1:
+                self.rank2_radar_speeds.popleft()
         
