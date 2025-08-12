@@ -146,7 +146,7 @@ class RadarHandler:
 
         try:
             # Read 4 bytes at a time (protocol frame size)
-            self.ser.reset_input_buffer()
+            #self.ser.reset_input_buffer()
             data = self.ser.read(4)
             if len(data) == 4:
                 return self._process_speed_data(data)
@@ -159,7 +159,6 @@ class RadarHandler:
     def _radar_read_loop(self):
         """Main radar reading loop running in a separate thread."""
         previous_reading = None
-        time.sleep(1)
         try:
             while self.radar_running:
                 try:
@@ -220,17 +219,18 @@ class RadarHandler:
         with self.radar_lock:
             # Early exit if no radar data available
             if not any([self.rank1_radar_speeds, self.rank2_radar_speeds, self.rank3_radar_speeds]):
-                return None
+                return None,False
             
             # Filter speeds above threshold once
-            min_speed = threshold - 5
+            min_speed = threshold - 2
             
             # Process calibration mode
             if self.is_calibrating[obj_class]:
-                return self._handle_calibration_mode(ai_speed, obj_class, min_speed)
-            
+                rs,r1=self._handle_calibration_mode(ai_speed, obj_class, min_speed)
+                return rs,r1
             # Normal mode: try each rank in order
-            return self._get_best_match_from_ranks(ai_speed, min_speed)
+            rs,r1=self._get_best_match_from_ranks(ai_speed, min_speed)
+            return rs,r1
 
     def _handle_calibration_mode(self, ai_speed, obj_class, min_speed):
         """
@@ -239,8 +239,8 @@ class RadarHandler:
         # Filter rank1 speeds once - more efficient with list comprehension
         valid_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if speed > min_speed]
         
-        if not valid_speeds:
-            return None
+        if not valid_speeds or len(valid_speeds)>1:
+            return None,False
         
         # Find best match
         best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
@@ -255,7 +255,7 @@ class RadarHandler:
         
         # Remove used speed and return
         self.rank1_radar_speeds.remove(best_match)
-        return best_match[1]
+        return best_match[1],True
 
     def _get_best_match_from_ranks(self, ai_speed, min_speed):
         """
@@ -264,10 +264,10 @@ class RadarHandler:
         # Define ranks to check in order of priority
         rank_configs = [
             [self.rank1_radar_speeds, 'rank1'],
-            [self.rank2_radar_speeds, 'rank2'], 
-            [self.rank3_radar_speeds, 'rank3']
+            [self.rank3_radar_speeds, 'rank3'], 
+            [self.rank2_radar_speeds, 'rank2']
         ]
-        
+        rank1=False
         for radar_speeds, rank_name in rank_configs:
             # Filter speeds above threshold - more efficient with list comprehension
             if rank_name is "rank1":
@@ -279,13 +279,15 @@ class RadarHandler:
                 # Get earliest timestamp (best match)
                 best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
                 
-                # Remove used speed
+                if len(valid_speeds)>1 and rank_name is "rank1":
+                  rank1=True
+                  
+				# Remove used speed
                 radar_speeds.remove(best_match)
-                
-                return best_match[1]
+                return best_match[1],rank1
         
         # No valid speeds found in any rank
-        return None
+        return None,rank1
         
     def _cleanup_old_speeds(self, speed_deque: deque, current_time: float) -> None:
         """

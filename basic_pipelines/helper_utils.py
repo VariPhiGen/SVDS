@@ -102,10 +102,10 @@ def crop_image_numpy(image_array: np.ndarray, bounding_box: Tuple[float, float, 
     y_max = max(upper, lower)
 
     # First try padded crop with clamping
-    x1 = max(0, int(x_min - pad))
-    y1 = max(0, int(y_min - pad))
-    x2 = min(w, int(x_max + pad))
-    y2 = min(h, int(y_max + pad))
+    x1 = max(2, int(x_min))
+    y1 = max(2, int(y_min))
+    x2 = min(w-1, int(x_max + pad))
+    y2 = min(h-1, int(y_max + pad))
 
     if x2 > x1 and y2 > y1:
         cropped = image_array[y1:y2, x1:x2]
@@ -115,8 +115,8 @@ def crop_image_numpy(image_array: np.ndarray, bounding_box: Tuple[float, float, 
     # Fallback to unclipped, unpadded box within bounds
     x1 = max(0, int(x_min))
     y1 = max(0, int(y_min))
-    x2 = min(w, int(x_max))
-    y2 = min(h, int(y_max))
+    x2 = min(w, int(x_max+20))
+    y2 = min(h, int(y_max+20))
 
     if x2 > x1 and y2 > y1:
         cropped = image_array[y1:y2, x1:x2]

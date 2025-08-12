@@ -80,7 +80,6 @@ class user_app_callback_class(app_callback_class):
         self.radar_maxdiff = None
         self.save_snapshots = None
         self.save_rtsp_images =None
-        self.take_cgi_snapshots = None
 
         # Traffic Overspeeding Distancewise Variables
         self.traffic_overspeeding_distancewise_data = None
@@ -141,8 +140,7 @@ class user_app_callback_class(app_callback_class):
         # Run CPU-intensive operations in thread pool
         loop = asyncio.get_event_loop()
         
-        cgi_snapshot = None
-        if sub_category == "Road Safety-Overspeeding" and hasattr(self, 'take_cgi_snapshots') and self.take_cgi_snapshots:
+        if sub_category == "Road Safety-Overspeeding":
             try:
                 final_speed = parameters["speed"]
                 suffix = f"{class_name}_{final_speed}"
@@ -293,15 +291,14 @@ class user_app_callback_class(app_callback_class):
                     self.distancewise_tracking.remove(tracker_id)
                     if vehicle_path[0][1] > vehicle_path[1][1]:
                         projected_distance, total_distance, lane_name = closest_line_projected_distance(vehicle_path, self.parameters_data["traffic_overspeeding_distancewise"]["lines"])
-                        print("Testing",projected_distance,total_distance,lane_name,self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
-                        if projected_distance > (0.2*self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]):
+                        if projected_distance > (0.3*self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]):
                             distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             
                             speed = float(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])) * float(self.calibrate_class_wise[obj_class])
-                            radar_speed = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
+                            radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
                             print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
                             
-                            if radar_speed is not None and speed != 0 :
+                            if radar_speed is not None and speed != 0 and rank1:
                                 self.calibrate_speed["speed"] = speed
                                 self.calibrate_speed["class_name"] = obj_class
                                 self.calibrate_speed["radar"] = radar_speed
@@ -310,7 +307,6 @@ class user_app_callback_class(app_callback_class):
                                 else:
                                     self.calibration_check(True)
                             if obj_class in self.calibrated_classes:
-                                image=self.image
                                 overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
         
         for result in overspeeding_result:
@@ -318,18 +314,18 @@ class user_app_callback_class(app_callback_class):
             if result["radar_speed"] is not None and 120 >= result["radar_speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+2):
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
-                anprimage = crop_image_numpy(image, result["box"])
+                anprimage = crop_image_numpy(self.image, result["box"])
                 xywh = [0, 0, 100, 100]
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
-                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["radar_speed"]}, datetimestamp, 1, anprimage)
+                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            if 120 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+2) and result["radar_speed"] is None:
+            if 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+2) and result["radar_speed"] is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
-                anprimage = crop_image_numpy(image, result["box"])
+                anprimage = crop_image_numpy(self.image, result["box"])
                 xywh = [0, 0, 100, 100]
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
-                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["speed"]}, datetimestamp, 1, anprimage)
+                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["speed"],"tag":"AI"}, datetimestamp, 1, anprimage)
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
@@ -494,8 +490,7 @@ if __name__ == "__main__":
     save_settings = config.get("save_settings", {})
     user_data.save_snapshots = bool(save_settings.get("save_snapshots", 0))
     user_data.save_rtsp_images = bool(save_settings.get("save_rtsp_images", 0))
-    user_data.take_cgi_snapshots = bool(save_settings.get("take_cgi_snapshots", 1))  # Default to True for backward compatibility
-    print(f"Save settings loaded from config: snapshots={user_data.save_snapshots}, rtsp_images={user_data.save_rtsp_images}, cgi_snapshots={user_data.take_cgi_snapshots}")
+    print(f"Save settings loaded from config: snapshots={user_data.save_snapshots}, rtsp_images={user_data.save_rtsp_images}")
     # Initialize radar if configured
     if "radar_config" in config:
         try:
