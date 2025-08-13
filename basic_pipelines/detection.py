@@ -80,6 +80,7 @@ class user_app_callback_class(app_callback_class):
         self.radar_maxdiff = None
         self.save_snapshots = None
         self.save_rtsp_images =None
+        self.ccai=time.time()
 
         # Traffic Overspeeding Distancewise Variables
         self.traffic_overspeeding_distancewise_data = None
@@ -121,11 +122,10 @@ class user_app_callback_class(app_callback_class):
             return  # invalid or missing data—nothing to do
 
         # Compute and store calibration factor
-        if flag is True and abs(ai-rs)<self.radar_maxdiff:
+        if (flag is True and abs(ai-rs)<self.radar_maxdiff) or flag is False:
             self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
-        else:
+        elif (time.time()-self.ccai) > 300:
             self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
-
         # Reset input values efficiently
         # Use assignment to None
         cs["speed"] = cs["radar"] = cs["class_name"] = None
@@ -297,7 +297,21 @@ class user_app_callback_class(app_callback_class):
                             speed = float(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])) * float(self.calibrate_class_wise[obj_class])
                             radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
                             print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
-                            
+                            # Log speed data to text file
+                            # try:
+                            #     if radar_speed is None:
+                            #         rt=0
+                            #     else:
+                            #         rt=radar_speed
+                            #     timestamp = datetime.now(self.ist_timezone).strftime("%Y-%m-%d %H:%M:%S")
+                            #     log_entry = f"{timestamp} - Tracker: {tracker_id}, Class: {obj_class}, AI_Speed: {speed:.2f} km/h, Radar_Speed: {rt:.2f} km/h, Lane: {lane_name}, calbiration: {self.radar_handler.is_calibrating[obj_class]}\n"
+                                
+                            #     # Write to single log file
+                            #     log_filename = "./speed_log.txt"
+                            #     with open(log_filename, "a", encoding="utf-8") as log_file:
+                            #         log_file.write(log_entry)
+                            # except Exception as e:
+                            #     print(f"Error writing to speed log file: {e}")
                             if radar_speed is not None and speed != 0 and rank1:
                                 self.calibrate_speed["speed"] = speed
                                 self.calibrate_speed["class_name"] = obj_class
@@ -311,7 +325,7 @@ class user_app_callback_class(app_callback_class):
         
         for result in overspeeding_result:
             obj_class = result["obj_class"]
-            if result["radar_speed"] is not None and 120 >= result["radar_speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+2):
+            if result["radar_speed"] is not None and 120 >= result["radar_speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]):
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])
@@ -319,7 +333,7 @@ class user_app_callback_class(app_callback_class):
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
                 self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            if 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+2) and result["radar_speed"] is None:
+            if 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]) and result["radar_speed"] is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])

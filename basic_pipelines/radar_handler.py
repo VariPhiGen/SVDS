@@ -1,328 +1,613 @@
-import serial
-import time
-from collections import deque
+from pathlib import Path
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+import os
+import numpy as np
+import cv2
+import hailo
+import concurrent.futures
+
+# External Libraries
+import json
+from collections import defaultdict, deque
+import queue
+from shapely.geometry import Point, Polygon
+import pytz
 from threading import Thread, Lock
-from typing import Optional, Dict, Any, List, Tuple
+from datetime import datetime
+import time
+import asyncio
+import argparse
+from snapshotapi import Snapshot
+
+# Local modules
+from kafka_handler import KafkaHandler
+from radar_handler import RadarHandler
+from helper_utils import (
+    setup_logging, encode_frame_to_bytes, is_vehicle_in_zone, crop_image_numpy,
+    closest_line_projected_distance, get_unique_tracker_ids, calculate_distance
+)
 
 
-class RadarHandler:
-    """Handles radar communication and speed data processing."""
-    
+from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
+from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
+
+
+
+# -----------------------------------------------------------------------------------------------
+# User-defined class to be used in the callback function
+# Initialize results queue
+results_analytics_queue = queue.Queue(maxsize=1)
+results_events_queue = queue.Queue(maxsize=100)
+# Initialize a deque to store tracker_ids for the last n frames
+last_n_frames_tracker_ids = deque(maxlen=30)
+# -----------------------------------------------------------------------------------------------
+# Inheritance from the app_callback_class
+class user_app_callback_class(app_callback_class):
     def __init__(self):
-        """Initialize radar handler."""
-        self.radar_data = deque(maxlen=5)  # Dictionary to store radar data for each tracked object
-        self.radar_port = None  # Serial port for radar
-        self.radar_baudrate = 9600  # Default baudrate
-        self.radar_thread = None
-        self.radar_running = False
-        self.radar_lock = Lock()  # Lock for thread-safe radar data access
-        self.count_radar = 0  # Count radar until it will become 0 again
-        # Use deques for better performance with time-series data
-        self.rank1_radar_speeds = deque()
-        self.rank2_radar_speeds = deque()
-        self.rank3_radar_speeds = deque()
-        self.ser = None
-        self.is_calibrating = {}
-        self.lr1t=time.time()
+        super().__init__()
+        self.new_variable = 42  # New variable example
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         
-    def init_radar(self, port: str, baudrate: int = 9600, max_age=10, max_diff_rais=15, calibration_required=2):
-        """
-        Initialize radar connection parameters.
+        # Camera Variables
+        self.sensor_id = None
+        self.hef_path=None
+        self.labels_json=None
+        self.zone_data = None
+        self.violation_id_data = None
+        self.parameters_data = None
         
-        Args:
-            port: Serial port for radar connection
-            baudrate: Baud rate for serial communication
-            max_age: Maximum age of speed readings in seconds
-            max_diff_rais: Maximum difference between consecutive readings
-            calibration_required: Number of calibration readings required
-        """
-        self.radar_port = port
-        self.radar_baudrate = baudrate
-        self.max_age = max_age
-        self.max_diff_rais = max_diff_rais
-        self.calibration_required = calibration_required
-        self.class_calibration_count = {}  # Track calibration count per class
-        self.ser = None
-        self._connect()
-        
-    def start_radar(self):
-        """Start the radar reading thread."""
-        if not self.radar_running and self.radar_port:
-            self.radar_running = True
-            self.radar_thread = Thread(target=self._radar_read_loop, daemon=True)
-            self.radar_thread.start()
+        # Image Variables
+        self.image = None
+        self.original_height = None
+        self.original_width = None
+        self.ratio = None
+        self.padx = None
+        self.pady = None
+        self.detection_boxes = None
+        self.classes = None
+        self.tracker_ids = None
+        self.anchor_points_original = None
+        self.ist_timezone = pytz.timezone('Asia/Kolkata')
+        self.last_n_frame_tracker_ids = None
+        self.time_stamp = deque(maxlen=4)
+        self.cleaning_time_for_events = time.time()
 
-    def stop_calbirating(self,obj_class):
-        self.is_calibrating[obj_class]=False
-            
-    def stop_radar(self):
-        """Stop the radar reading thread."""
-        self.radar_running = False
-        if self.radar_thread:
-            self.radar_thread.join()
-    
-    def _connect(self) -> None:
-        """Establish serial connection to radar."""
+        # Radar handler
+        self.radar_handler = RadarHandler()
+        self.radar_maxdiff = None
+        self.save_snapshots = None
+        self.save_rtsp_images =None
+        self.ccai=time.time()
+
+        # Traffic Overspeeding Distancewise Variables
+        self.traffic_overspeeding_distancewise_data = None
+        self.distancewise_tracking = None
+        self.calibrate_class_wise = {}
+        self.calibrate_speed = {}
+        self.calibrated_classes = set()  # Track which classes are done calibrating
+
+        # Queue for sending Data to Kafka
+        self.results_analytics_queue = None
+        self.results_events_queue = None
+        
+        # Active methods
+        self.active_methods = None
+        self.active_activities_for_cleaning = []
+        
+        # Run Triggering Loop for raving Camera Snapshot
+        self.cam = None
+        
+        self.main_loop = asyncio.new_event_loop()
+        self.asyncio_thread = Thread(target=self.start_asyncio_loop, daemon=True)
+        self.asyncio_thread.start()
+        
+    def calibration_check(self,flag=False):
+        """
+        Compute a per-class calibration factor (radar_speed / ai_speed),
+        store it in self.calibrate_class_wise and then clear calibration inputs.
+        """
+        cs = self.calibrate_speed
+        ai_speed = cs.get("speed")
+        radar_speed = cs.get("radar")
+        cls = cs.get("class_name")
+
+        # Validate required inputs quickly
         try:
-            self.ser = serial.Serial(
-                port=self.radar_port,
-                baudrate=self.radar_baudrate,
-                timeout=0.02,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE
+            ai = float(ai_speed)
+            rs = float(radar_speed)
+        except (TypeError, ValueError):
+            return  # invalid or missing data—nothing to do
+
+        # Compute and store calibration factor
+        if (flag is True and abs(ai-rs)<self.radar_maxdiff) or flag is False:
+            self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
+        elif (time.time()-self.ccai) > 300:
+            self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
+        # Reset input values efficiently
+        # Use assignment to None
+        cs["speed"] = cs["radar"] = cs["class_name"] = None
+
+        return True
+        
+    def start_asyncio_loop(self):
+        asyncio.set_event_loop(self.main_loop)
+        self.main_loop.run_forever()
+        
+    async def trigger_snapshot_loop(self, xywh, class_name, sub_category, parameters, datetimestamp, confidence=1, anprimage=None):
+        # Run CPU-intensive operations in thread pool
+        loop = asyncio.get_event_loop()
+        
+        if sub_category == "Road Safety-Overspeeding":
+            try:
+                final_speed = parameters["speed"]
+                suffix = f"{class_name}_{final_speed}"
+                
+                # Run camera capture in thread pool
+                filename, cgi_snapshot = self.cam.capture(prefix=str(suffix))
+                
+                if hasattr(self, 'save_snapshots') and filename and cgi_snapshot:
+                    # Run file operations in thread pool
+                    await loop.run_in_executor(
+                        self.thread_pool,
+                        self._save_snapshot,
+                        filename, cgi_snapshot
+                    )
+            except Exception as e:
+                print(f"Error in snapshot capture: {e}")
+                if hasattr(self, 'kafka_handler') and self.kafka_handler:
+                    self.kafka_handler.send_error_log(f"Error in snapshot capture: {e}", sensor_id=self.sensor_id)    
+                # Error handling...
+        
+        # Run video generation in thread pool
+        video_bytes = await loop.run_in_executor(
+            self.thread_pool,
+            self.recorder.generate_video_bytes
+        )
+        
+        try:
+            if anprimage is not None:
+                # Convert from BGR to RGB
+                print("running anpr image ")
+                anprimage_rgb = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
+                image = encode_frame_to_bytes(anprimage_rgb, 100)
+                height, width = anprimage.shape[:2]
+                anpr_status = "True"
+                    
+            else:
+                frame_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
+                image = encode_frame_to_bytes(frame_rgb)
+                height, width = self.image.shape[:2]
+                anpr_status = "False"
+        
+            # Note: rtsp_image_path functionality moved to KafkaHandler
+            # Save RTSP images only if enabled
+            rtsp_image_path = None
+            if hasattr(self, 'save_rtsp_images') and self.save_rtsp_images:
+                # Choose a valid BGR image: prefer cropped ANPR image if provided, else full frame
+                img_for_rtsp = anprimage_rgb if anprimage is not None else self.image
+                print("Trying to Save RTSP")
+                rtsp_image_path = self.recorder.save_images(img_for_rtsp, "/home/arresto/SVDS2/original_croppings/", suffix)
+                print(rtsp_image_path)
+            
+        except Exception as e:
+            error_msg = f"Failed to save images from RTSP stream: {e}"
+            if hasattr(user_data, 'kafka_handler') and user_data.kafka_handler:
+                user_data.kafka_handler.send_error_log(error_msg, sensor_id=user_data.sensor_id)
+            
+        message = {
+            "sensor_id": self.sensor_id,
+            "org_img": image,
+            "snap_shot": cgi_snapshot,
+            "video": video_bytes if video_bytes else None,
+            "absolute_bbox": [{"xywh": xywh, "class_name": class_name, "confidence": confidence, "subcategory": sub_category, "parameters": parameters, "anpr": anpr_status}],
+            "datetimestamp": datetimestamp,
+            "imgsz": f"{width}:{height}",
+            "color": "#FFFF00"
+        }
+           
+        #image = Image.open(io.BytesIO(message["org_img"]))
+        #image.save(f'output_image{message["datetimestamp_trackerid"]}.jpg') 
+        # CRITICAL: Use non-blocking queue operations
+        try:
+            self.results_events_queue.put_nowait(message)
+        except queue.Full:
+            pass
+
+    def _save_snapshot(self, filename, cgi_snapshot):
+        """Synchronous snapshot saving in thread pool."""
+        SAVE_FOLDER = "./snapshots"
+        os.makedirs(SAVE_FOLDER, exist_ok=True)
+        path = os.path.join(SAVE_FOLDER, filename)
+        with open(path, "wb") as f:
+            f.write(cgi_snapshot)
+    
+    def new_function(self):  # New function example
+        return "The meaning of life is: "
+    
+
+# -----------------------------------------------------------------------------------------------
+# Inheritance from the app_callback_class
+# -----------------------------------------------------------------------------------------------
+
+    def create_result_analytics(self, timestamp, analytics_name, class_name, zone_name, type, value):
+        message = {
+            "sensor_id": self.sensor_id,
+            "datetimestamp": timestamp,
+            "analytic_type": analytics_name,
+            "class_name": class_name,
+            "area": zone_name,
+            "type": type,
+            "value": value
+        }
+        try:
+            self.results_analytics_queue.put_nowait(message)
+        except queue.Full:
+            # Handle gracefully without blocking
+            pass
+
+    def create_result_overspeeding_events(self, xywh, class_name, sub_category, parameters, datetimestamp_trackerid, confidence=1, anprimage=None):
+        asyncio.run_coroutine_threadsafe(self.trigger_snapshot_loop(xywh, class_name, sub_category, parameters, datetimestamp_trackerid, confidence, anprimage), self.main_loop)
+
+    def cleaning_events_data_with_last_frames(self):
+        # Cleaning Violations
+        for activity in self.active_activities_for_cleaning:
+            if activity == "traffic_overspeeding_distancewise":
+                for tracker_id in list(self.traffic_overspeeding_distancewise_data.keys()):
+                    # Check if tracker_id is not in self.last_n_frame_tracker_ids
+                    if tracker_id not in self.last_n_frame_tracker_ids:
+                        # Remove the tracker_id from self.traffic_overspeeding_distancewise_data
+                        del self.traffic_overspeeding_distancewise_data[tracker_id]
+    
+    # Activities Logics
+    def traffic_overspeeding_distancewise(self):
+        overspeeding_result = []
+        vehicle_index = [i for i, cls in enumerate(self.classes) if cls in self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"].keys()]
+        count = 0
+        image=None
+        # �� MOST CRITICAL: Add this early exit
+        if not vehicle_index:
+            return 
+        
+        for idx in vehicle_index:
+            box = self.detection_boxes[idx]
+            obj_class = self.classes[idx]
+            tracker_id = self.tracker_ids[idx]
+            anchor = self.anchor_points_original[idx]
+            if tracker_id in self.violation_id_data["traffic_overspeeding_distancewise"]:
+                continue
+            for zone_name, zone_polygon in self.zone_data["traffic_overspeeding_distancewise"].items():
+                if is_vehicle_in_zone(anchor, zone_polygon):
+                    count += 1
+                    if tracker_id not in self.distancewise_tracking and tracker_id not in self.violation_id_data["traffic_overspeeding_distancewise"]:
+                        self.distancewise_tracking.append(tracker_id)
+                        self.traffic_overspeeding_distancewise_data[tracker_id]["entry_anchor"] = anchor
+                        self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"] = self.time_stamp[-1]
+                        
+                elif tracker_id in self.distancewise_tracking and tracker_id not in self.violation_id_data["traffic_overspeeding_distancewise"]:
+                    vehicle_path = [anchor, self.traffic_overspeeding_distancewise_data[tracker_id]["entry_anchor"]]
+                    self.distancewise_tracking.remove(tracker_id)
+                    if vehicle_path[0][1] > vehicle_path[1][1]:
+                        projected_distance, total_distance, lane_name = closest_line_projected_distance(vehicle_path, self.parameters_data["traffic_overspeeding_distancewise"]["lines"])
+                        if projected_distance > (0.3*self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]):
+                            distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
+                            
+                            speed = float(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])) * float(self.calibrate_class_wise[obj_class])
+                            radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
+                            print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
+                            # Log speed data to text file
+                            try:
+                                if radar_speed is None:
+                                    rt=0
+                                else:
+                                    rt=radar_speed
+                                timestamp = datetime.now(self.ist_timezone).strftime("%Y-%m-%d %H:%M:%S")
+                                log_entry = f"{timestamp} - Tracker: {tracker_id}, Class: {obj_class}, AI_Speed: {speed:.2f} km/h, Radar_Speed: {rt:.2f} km/h, Lane: {lane_name}, calbiration: {self.radar_handler.is_calibrating[obj_class]}\n"
+                                
+                                # Write to single log file
+                                log_filename = "./speed_log.txt"
+                                with open(log_filename, "a", encoding="utf-8") as log_file:
+                                    log_file.write(log_entry)
+                            except Exception as e:
+                                print(f"Error writing to speed log file: {e}")
+                            if radar_speed is not None and speed != 0 and rank1:
+                                self.calibrate_speed["speed"] = speed
+                                self.calibrate_speed["class_name"] = obj_class
+                                self.calibrate_speed["radar"] = radar_speed
+                                if obj_class not in self.calibrated_classes and self.calibration_check() and self.radar_handler.is_calibrating[obj_class] is False:
+                                    self.calibrated_classes.add(obj_class)
+                                else:
+                                    self.calibration_check(True)
+                            if obj_class in self.calibrated_classes:
+                                overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+        
+        for result in overspeeding_result:
+            obj_class = result["obj_class"]
+            if result["radar_speed"] is not None and 120 >= result["radar_speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]):
+                # Get the bounding rectangle of the polygon
+                self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
+                anprimage = crop_image_numpy(self.image, result["box"])
+                xywh = [0, 0, 100, 100]
+                datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
+                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
+            
+            if 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]) and result["radar_speed"] is None:
+                # Get the bounding rectangle of the polygon
+                self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
+                anprimage = crop_image_numpy(self.image, result["box"])
+                xywh = [0, 0, 100, 100]
+                datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
+                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["speed"],"tag":"AI"}, datetimestamp, 1, anprimage)
+# -----------------------------------------------------------------------------------------------
+# User-defined callback function
+# -----------------------------------------------------------------------------------------------
+
+# This is the callback function that will be called when data is available from the pipeline
+def app_callback(pad, info, user_data,frame_type):
+    global last_n_frames_tracker_ids
+    # Get the GstBuffer from the probe info
+    buffer = info.get_buffer()
+    # Check if the buffer is valid
+    if buffer is None:
+        return Gst.PadProbeReturn.OK
+
+    # Using the user_data to count the number of frames
+    user_data.increment()
+    string_to_print = f"Frame count: {user_data.get_count()}\n"
+
+    # Get the caps from the pad
+    format, width, height = get_caps_from_pad(pad)
+    
+    if frame_type == "original":
+        # print(user_data.original_frame_count)
+        if format is not None and width is not None and height is not None:
+            # Get video frame
+            user_data.image = get_numpy_from_buffer(buffer, format, width, height)
+            # user_data.image = cv2.cvtColor(user_data.image, cv2.COLOR_BGR2RGB)
+            if user_data.original_height is None:
+                user_data.original_height=height
+                user_data.original_width=width
+    else:
+        # If the user_data.use_frame is set to True, we can get the video frame from the buffer
+        frame = None
+        if format is not None and width is not None and height is not None:
+            buf_timestamp = buffer.pts  # nanoseconds
+            ts = buf_timestamp / Gst.SECOND
+            #print(ts)
+            user_data.time_stamp.append(ts)
+            # Get video frame
+            frame = get_numpy_from_buffer(buffer, format, width, height)
+            user_data.recorder.add_frame(frame)
+            
+            
+        # Get the detections from the buffer
+        roi = hailo.get_roi_from_buffer(buffer)
+        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+
+        #user_data.time_stamp.append(tr)
+
+        # Parse the detections
+        detection_count = 0
+        xyxys=[]
+        class_ids=[]
+        class_names=[]
+        confidences=[]
+        tracker_ids=[]
+        anchor_points_original=[]
+        
+        if user_data.ratio is None:
+            user_data.ratio=min(width/user_data.original_width,height/user_data.original_height)
+            user_data.padx=int((width - user_data.original_width*user_data.ratio)/2)
+            user_data.pady=int((height - user_data.original_height*user_data.ratio)/2)
+        else:
+            for detection in detections:
+                label = detection.get_label()
+                bbox = detection.get_bbox()
+                confidence = detection.get_confidence()
+                # Get track ID
+                track_id = 0
+                track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+                if len(track) == 1:
+                    track_id = track[0].get_id()
+                    tracker_ids.append(track_id)
+                    x_min=max(int((bbox.xmin()*width-user_data.padx)/user_data.ratio),0)
+                    y_min=max(int((bbox.ymin()*height-user_data.pady)/user_data.ratio),0)
+                    x_max=max(int((bbox.xmax()*width-user_data.padx)/user_data.ratio),0)
+                    y_max=max(int((bbox.ymax()*height-user_data.pady)/user_data.ratio),0)
+                    #Appending the results from Detections
+                    xyxys.append([x_min,y_min,x_max,y_max])
+                    class_ids.append(detection.get_class_id())
+                    class_names.append(label)
+                    confidences.append(confidence)
+                    anchor_points_original.append((((x_min+x_max)/ 2),(y_max)))
+                
+                detection_count += 1
+            
+            # Updating the Activities Instance
+            user_data.detection_boxes=xyxys
+            user_data.classes= class_names
+            user_data.tracker_ids=tracker_ids
+            user_data.anchor_points_original=anchor_points_original
+            
+            # Last n frame tracker ids
+            last_n_frames_tracker_ids.append(tracker_ids)
+            user_data.last_n_frame_tracker_ids = get_unique_tracker_ids(last_n_frames_tracker_ids)
+
+            # BEFORE: Clean every 60 seconds
+            if int((time.time()-user_data.cleaning_time_for_events)) > 120:
+                user_data.cleaning_events_data_with_last_frames() 
+                user_data.cleaning_time_for_events=time.time()
+
+            for method in user_data.active_methods:
+                method()
+
+    return Gst.PadProbeReturn.OK
+
+if __name__ == "__main__":
+    project_root = Path(__file__).resolve().parent.parent
+    env_file     = project_root / ".env"
+    env_path_str = str(env_file)
+    os.environ["HAILO_ENV_FILE"] = env_path_str
+    # Logging is disabled - all errors sent to Kafka
+    setup_logging()
+
+    # Create an instance of the user app callback class
+    user_data = user_app_callback_class()
+
+    # Load the JSON data from the file
+    try:
+        with open('configuration.json', 'r') as file:
+            config = json.load(file)
+    except Exception as e:
+        exit(1)
+    # Setup the Hef-path with path existence check
+    try:
+        hef_path = config.get("default_arguments", {}).get("hef_path")
+        labels_json = config.get("default_arguments", {}).get("labels-json")
+        
+        # Check if hef_path exists and is not None/empty
+        if hef_path and hef_path != "None" and os.path.exists(hef_path):
+            user_data.hef_path = hef_path
+            print(f"✅ Using HEF file: {hef_path}")
+        else:
+            user_data.hef_path = None
+            print(f"⚠️  HEF file not found or invalid: {hef_path}")
+        
+        # Check if labels_json exists and is not None/empty
+        if labels_json and labels_json != "None" and os.path.exists(labels_json):
+            user_data.labels_json = labels_json
+            print(f"✅ Using labels file: {labels_json}")
+        else:
+            user_data.labels_json = None
+            print(f"⚠️  Labels file not found or invalid: {labels_json}")
+            
+    except Exception as e:
+        print(f"❌ Error setting up file paths: {e}")
+        user_data.hef_path = None
+        user_data.labels_json = None
+    # Set up Kafka error logging for radar handler
+    try:
+        kafka_handler = KafkaHandler(config)
+        user_data.kafka_handler = kafka_handler
+        
+        # Set up error logger for radar handler
+        def error_logger(error_message):
+            kafka_handler.send_error_log(error_message, sensor_id=config.get("sensor_id"))
+        
+        user_data.radar_handler.set_error_logger(error_logger)
+    except Exception as e:
+        exit(1)
+
+    # Get save settings from config
+    save_settings = config.get("save_settings", {})
+    user_data.save_snapshots = bool(save_settings.get("save_snapshots", 0))
+    user_data.save_rtsp_images = bool(save_settings.get("save_rtsp_images", 0))
+    print(f"Save settings loaded from config: snapshots={user_data.save_snapshots}, rtsp_images={user_data.save_rtsp_images}")
+    # Initialize radar if configured
+    if "radar_config" in config:
+        try:
+            radar_config = config["radar_config"]
+            user_data.radar_maxdiff=radar_config.get("max_diff_rais", 15)
+            user_data.radar_handler.init_radar(
+                port=radar_config.get("port", "/dev/ttyACM0"),
+                baudrate=radar_config.get("baudrate", 9600),
+                max_age=radar_config.get("max_age", 10),
+                max_diff_rais=radar_config.get("max_diff_rais", 15),
+                calibration_required=config.get("calibration_required", 2)
+            )
+            user_data.radar_handler.start_radar()
+        except Exception as e:
+            kafka_handler.send_error_log(f"Failed to initialize radar: {e}", sensor_id=config.get("sensor_id"))
+        
+    # Snapshot if configured
+    if "camera_details" in config:
+        try:
+            cam_config = config["camera_details"]
+            user_data.cam = Snapshot(
+                camera_ip=cam_config.get("camera_ip"),
+                user=cam_config.get("username"),
+                pwd=cam_config.get("password")
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to connect to radar: {e}")
-            
-    def set_error_logger(self, error_logger):
-        """Set the error logger function for sending errors to Kafka."""
-        self.error_logger = error_logger
+            kafka_handler.send_error_log(f"Failed to initialize camera: {e}", sensor_id=config.get("sensor_id"))
     
-    def _process_speed_data(self, data: bytes) -> Optional[Dict[str, Any]]:
-        """
-        Process raw radar speed data.
-        
-        Args:
-            data: Raw bytes from radar
-            
-        Returns:
-            Processed speed data dictionary or None
-        """
-        if not data:
-            return None
-            
-        try:
-            # Convert bytes to list of hex strings for debugging
-            hex_data = [hex(x) for x in data]
-            # Debug data removed - can be added back if needed
-            
-            # Process each 4-byte chunk
-            for i in range(len(data) - 3):
-                # Check for target speed pattern: 0xFC 0xFA sum 0x00
-                if data[i] == 0xFC and data[i+1] == 0xFA and data[i+3] == 0x00:
-                    speed_raw = data[i+2]
-                    if 0x0F <= speed_raw <= 0xFA:  # Valid speed range
-                        speed_kmh = speed_raw
-                        direction = 'Approaching'
-                        return {
-                            'speed': speed_kmh,
-                            'direction': direction,
-                            'type': 'Primary Target'
-                        }
+    # Add recorder to user_data for frame recording
+    user_data.recorder = kafka_handler.recorder
+    
+    # Getting Kafka Configuration
+    kafka_variables = config.get("kafka_variables", {})
+    user_data.reset_threshold = kafka_variables["reset_threshold"]
+
+    # Creating Thread for Kafka
+    kafka_thread = Thread(target=kafka_handler.run_kafka_loop, args=(results_events_queue, results_analytics_queue))
+    kafka_thread.daemon = True
+    kafka_thread.start()
+    
+    #Getting Data available
+    sensor_id=config.get("sensor_id")
+    available_activities = config.get("available_activities")
+    active_activities = config.get("active_activities")
+    user_data.sensor_id = sensor_id
+    user_data.results_analytics_queue = results_analytics_queue
+    user_data.results_events_queue = results_events_queue
+    
+    # Extract zones data for each activity in activities_data
+    zones_data = {}
+    parameters_data={}
+    violation_id_data={}
+    for activity, details in config["activities_data"].items():
+        if "zones" in details and activity in active_activities:
+            if activity=="traffic_overspeeding_distancewise":
+                zones_data[activity] = {zone: Polygon(coords) for zone, coords in details["zones"].items()}
+                parameters_data[activity]=details["parameters"]
+                violation_id_data[activity]=[]
+                user_data.traffic_overspeeding_distancewise_data=defaultdict(lambda: defaultdict(dict))
+                user_data.distancewise_tracking=[]
+                parameters_data["traffic_overspeeding_distancewise"]["lines_length"]={}
+                user_data.time_stamp=deque(maxlen=20)
+                # Initialize calibration count to 0 for each class
+                for class_name in details["parameters"]["speed_limit"].keys():
+                    user_data.radar_handler.class_calibration_count[class_name] = 0
+                    user_data.radar_handler.is_calibrating[class_name]=True
                 
-                # Check for leading target speed pattern: 0xFB 0xFD sum 0x00
-                elif data[i] == 0xFB and data[i+1] == 0xFD and data[i+3] == 0x00:
-                    speed_raw = data[i+2]
-                    if 0x00 <= speed_raw <= 0xFA:  # Valid speed range
-                        speed_kmh = speed_raw
-                        direction = 'Receding'
-                        
-                        return {
-                            'speed': speed_kmh,
-                            'direction': direction,
-                            'type': 'Leading Target'
-                        }
-            
-            return None
-        except Exception as e:
-            if hasattr(self, 'error_logger') and self.error_logger:
-                self.error_logger(f"Error processing speed data: {e}")
-            return None
+                for class_name, limit in details["parameters"]["speed_limit"].items():
+                    # Calibrate using your logic; here's an example:
+                    user_data.calibrate_class_wise[class_name] = details["parameters"]["calibration"]
+                user_data.calibrate_speed["speed"] = None
+                user_data.calibrate_speed["class_name"] = None
+                user_data.calibrate_speed["radar"] = None
+                user_data.calibrate_speed["last_seen"] = time.time() 
+                    
+                for lane_name,coordinates in parameters_data[activity]["lines"].items():
+                    total_distance = 0
+                    # Iterate over the pairs of coordinates in the line
+                    for i in range(len(coordinates) - 1):
+                        x1, y1 = coordinates[i]
+                        x2, y2 = coordinates[i + 1]
+                        total_distance += calculate_distance(x1, y1, x2, y2)  # Calculate distance for each segment
+                    
+                    parameters_data[activity]["lines_length"][lane_name] = total_distance
 
-    def get_speed(self) -> Optional[Dict[str, Any]]:
-        """
-        Get current speed reading from radar.
-        
-        Returns:
-            Speed data dictionary or None
-        """
-        if not self.ser:
-            try:
-                self._connect()
-            except Exception as e:
-                if hasattr(self, 'error_logger') and self.error_logger:
-                    self.error_logger(f"Radar reconnection failed: {e}")
-                return None
+                user_data.active_activities_for_cleaning.append(activity)
+    #Assigning Zones Data to Activity Instance
+    user_data.zone_data=zones_data
+    user_data.parameters_data = parameters_data
+    user_data.violation_id_data = violation_id_data
 
-        try:
-            # Read 4 bytes at a time (protocol frame size)
-            #self.ser.reset_input_buffer()
-            data = self.ser.read(4)
-            if len(data) == 4:
-                return self._process_speed_data(data)
-        except Exception as e:
-            if hasattr(self, 'error_logger') and self.error_logger:
-                self.error_logger(f"Radar read error: {e}")
-            self.ser = None  # Force reconnection on next attempt
-        return None
-    
-    def _radar_read_loop(self):
-        """Main radar reading loop running in a separate thread."""
-        previous_reading = None
-        try:
-            while self.radar_running:
-                try:
-                    speed_data = self.get_speed()
-                    if speed_data is not None:
-                        speed = speed_data['speed']
-                        direction = speed_data['direction']
-                        target_type = speed_data['type']   
-                        
-                        # Parse the radar data with thread safety
-                        try:
-                            
-                            # Reset counter if speed difference is too large
-                            if previous_reading is not None and abs(speed - previous_reading) > 4:
-                                self.count_radar = 0
-                            
-                            previous_reading = speed
-                            
-                            if speed != 0:
-                                self.count_radar += 1
-                                current_time = time.time()
-                                
-                                # Process based on count
-                                if self.count_radar == 1:
-                                    # First reading goes to rank1
-                                    self._add_speed_to_rank(speed, self.rank1_radar_speeds, current_time)
-                                    
-                                elif self.count_radar != 0:
-                                    # Even readings go to rank2
-                                    self._add_speed_to_rank(speed, self.rank3_radar_speeds, current_time)
-                                    # Process rank2 to rank3 transfer
-                                    self._process_rank3_to_rank2()
-                                    print(f"Rank1 speeds: {list(self.rank1_radar_speeds)}")
-                                    print(f"Rank2 speeds: {list(self.rank2_radar_speeds)}")
-                                    print(f"Rank3 speeds: {list(self.rank3_radar_speeds)}")
-                                
-                                print(f"Actual Radar Running Speed: {speed}, Count: {self.count_radar}")
-                            else:
-                                self.count_radar = 0
-                        except (ValueError, IndexError) as e:
-                            if hasattr(self, 'error_logger') and self.error_logger:
-                                self.error_logger(f"Error parsing radar data: {e}")
-                            continue
-                            
-                except serial.SerialException as e:
-                    if hasattr(self, 'error_logger') and self.error_logger:
-                        self.error_logger(f"Serial communication error: {e}")
-                    break
-                        
-        except serial.SerialException as e:
-            if hasattr(self, 'error_logger') and self.error_logger:
-                self.error_logger(f"Failed to open radar serial port: {e}")
-        
-    def get_radar_data(self, ai_speed,threshold, obj_class):
-        """
-        Optimized radar speed matching with early exit and cleaner logic
-        """
-        with self.radar_lock:
-            # Early exit if no radar data available
-            if not any([self.rank1_radar_speeds, self.rank2_radar_speeds, self.rank3_radar_speeds]):
-                return None,False
-            
-            # Filter speeds above threshold once
-            min_speed = threshold - 2
-            
-            # Process calibration mode
-            if self.is_calibrating[obj_class]:
-                rs,r1=self._handle_calibration_mode(ai_speed, obj_class, min_speed)
-                return rs,r1
-            # Normal mode: try each rank in order
-            rs,r1=self._get_best_match_from_ranks(ai_speed, min_speed)
-            return rs,r1
-
-    def _handle_calibration_mode(self, ai_speed, obj_class, min_speed):
-        """
-        Handle calibration mode with early exit
-        """
-        # Filter rank1 speeds once - more efficient with list comprehension
-        valid_speeds = [(ts, speed) for ts, speed in self.rank1_radar_speeds if speed > min_speed]
-        
-        if not valid_speeds or len(valid_speeds)>1:
-            return None,False
-        
-        # Find best match
-        best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
-        
-        # Update calibration count
-        if self.class_calibration_count[obj_class] < self.calibration_required:
-            self.class_calibration_count[obj_class] += 1
-            print(f"Calibration for {obj_class}: {self.class_calibration_count[obj_class]}/{self.calibration_required} done.")
+    # Making Active Methods 
+    active_methods=[]
+    for activity in active_activities:
+        # Retrieve the method from the Activities instance if it exists
+        activity_func = getattr(user_data, activity, None)
+        if callable(activity_func):
+            active_methods.append(activity_func)
         else:
-            self.stop_calbirating(obj_class)
-            
-        
-        # Remove used speed and return
-        self.rank1_radar_speeds.remove(best_match)
-        return best_match[1],True
+            # Activity not recognized - silently continue
+            pass
 
-    def _get_best_match_from_ranks(self, ai_speed, min_speed):
-        """
-        Get best match from available ranks with early exit
-        """
-        # Define ranks to check in order of priority
-        rank_configs = [
-            [self.rank1_radar_speeds, 'rank1'],
-            [self.rank3_radar_speeds, 'rank3'], 
-            [self.rank2_radar_speeds, 'rank2']
-        ]
-        rank1=False
-        for radar_speeds, rank_name in rank_configs:
-            # Filter speeds above threshold - more efficient with list comprehension
-            if rank_name is "rank1":
-                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if ts > self.lr1t]
-            else:
-                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if (speed-ai_speed) < self.max_diff_rais]
-            print(radar_speeds,rank_name)
-            if valid_speeds:
-                # Get earliest timestamp (best match)
-                best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
-                
-                if len(valid_speeds)==1 and rank_name is "rank1":
-                  rank1=True
-                  
-				# Remove used speed
-                radar_speeds.remove(best_match)
-                return best_match[1],rank1
-        
-        # No valid speeds found in any rank
-        return None,rank1
-        
-    def _cleanup_old_speeds(self, speed_deque: deque, current_time: float) -> None:
-        """
-        Remove old speed entries from a deque based on max_age.
-        
-        Args:
-            speed_deque: Deque containing (timestamp, speed) tuples
-            current_time: Current timestamp
-        """
-        while speed_deque and (current_time - speed_deque[0][0]) >= self.max_age:
-            speed_deque.popleft()
+    user_data.active_methods=active_methods
     
-    def _add_speed_to_rank(self, speed: int, rank_deque: deque, current_time: float) -> None:
-        """
-        Add speed to a rank deque with cleanup.
-        
-        Args:
-            speed: Speed value to add
-            rank_deque: Target deque to add to
-            current_time: Current timestamp
-        """
-        self._cleanup_old_speeds(rank_deque, current_time)
-        rank_deque.append((current_time, speed))
-    
-    def _process_rank3_to_rank2(self) -> None:
-        """
-        Process rank2 speeds and move oldest to rank2 when rank3 has 2 entries.
-        """
-        if len(self.rank3_radar_speeds) >= 2:
-            # Move oldest speed from rank3 to rank2
-            oldest_speed = self.rank3_radar_speeds.popleft()
-            self.rank2_radar_speeds.append(oldest_speed)
-            
-            # Keep only the most recent entry in rank3
-            if len(self.rank2_radar_speeds) > 1:
-                self.rank2_radar_speeds.popleft()
-        
+    app = GStreamerDetectionApp(app_callback, user_data)
+    app.run()
