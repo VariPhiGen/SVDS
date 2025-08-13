@@ -23,6 +23,7 @@ class RadarHandler:
         self.rank3_radar_speeds = deque()
         self.ser = None
         self.is_calibrating = {}
+        self.lr1t=time.time()
         
     def init_radar(self, port: str, baudrate: int = 9600, max_age=10, max_diff_rais=15, calibration_required=2):
         """
@@ -66,7 +67,7 @@ class RadarHandler:
             self.ser = serial.Serial(
                 port=self.radar_port,
                 baudrate=self.radar_baudrate,
-                timeout=0.1,
+                timeout=0.02,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE
@@ -271,9 +272,9 @@ class RadarHandler:
         for radar_speeds, rank_name in rank_configs:
             # Filter speeds above threshold - more efficient with list comprehension
             if rank_name is "rank1":
-                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if speed > min_speed]
+                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if ts > self.lr1t]
             else:
-                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if speed > min_speed and abs(speed-ai_speed) < self.max_diff_rais]
+                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if (speed-ai_speed) < self.max_diff_rais]
             print(radar_speeds,rank_name)
             if valid_speeds:
                 # Get earliest timestamp (best match)
