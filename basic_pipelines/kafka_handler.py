@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from video_clipper import VideoClipRecorder
 from boto3.s3.transfer import TransferConfig
+from botocore.client import Config 
 
 # S3 Transfer configuration for multipart uploads (used for video files)
 S3_TRANSFER_CONFIG = TransferConfig(
@@ -38,6 +39,12 @@ class KafkaHandler:
         self.error_interval = 300
         self.executor = ThreadPoolExecutor(max_workers=3)
         
+        # Flush tracking for smart flushing
+        self.last_flush_time = time.time()
+        self.messages_since_flush = 0
+        self.flush_interval = 20  # Flush every 5 seconds
+        self.flush_threshold = 10  # Or after 10 messages
+        
         # Dual broker redundancy settings
         self.brokers = self._get_broker_list()
         self.current_broker_index = 0
@@ -63,6 +70,7 @@ class KafkaHandler:
         
         bootstrap_servers = kafka_config.get("bootstrap_servers")
         if isinstance(bootstrap_servers, list):
+            print("List of Bootstrap_servers",bootstrap_servers)
             return bootstrap_servers
         
         primary = kafka_config.get("primary_broker")
@@ -101,6 +109,8 @@ class KafkaHandler:
                 client = boto3.client(
                     "s3",
                     aws_access_key_id=config.get("aws_access_key_id"),
+                    endpoint_url=f"http://{config.get('end_point_url')}",
+                    config=Config(signature_version="s3v4"),
                     aws_secret_access_key=config.get("aws_secret_access_key"),
                     region_name=config.get("region_name")
                 )
@@ -159,7 +169,7 @@ class KafkaHandler:
         """Test if a broker is reachable."""
         try:
             test_producer = KafkaProducer(
-                bootstrap_servers=[broker],
+                bootstrap_servers=str(broker),
                 request_timeout_ms=5000,
                 max_block_ms=2000
             )
@@ -183,6 +193,7 @@ class KafkaHandler:
             return None
             
         broker = healthy_brokers[self.current_broker_index % len(healthy_brokers)]
+        
         self.current_broker_index += 1
         return broker
         
@@ -197,10 +208,11 @@ class KafkaHandler:
             kafka_config = self.config.get("kafka_variables", {})
             linger = int(kafka_config.get("linger_ms", 50))
             batch = int(kafka_config.get("batch_size", 512*1024))
+            
             producer = KafkaProducer(
-                bootstrap_servers=[broker],
+                bootstrap_servers=str(broker),
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                acks='1',
+                acks='all',
                 retries=3,
                 retry_backoff_ms=500,
                 compression_type='gzip',
@@ -234,6 +246,43 @@ class KafkaHandler:
                 
         self.kafka_pipeline = self._create_kafka_producer()
         
+    def _smart_flush(self):
+        """Smart flush that balances performance and reliability."""
+        if not self.kafka_pipeline:
+            return
+            
+        current_time = time.time()
+        self.messages_since_flush += 1
+        
+        # Flush if:
+        # 1. Time interval exceeded, OR
+        # 2. Message threshold reached, OR
+        # 3. This is a critical message (you can add logic here)
+        should_flush = (
+            (current_time - self.last_flush_time) >= self.flush_interval or
+            self.messages_since_flush >= self.flush_threshold
+        )
+        
+        if should_flush:
+            try:
+                self.kafka_pipeline.flush(timeout=5)
+                self.last_flush_time = current_time
+                self.messages_since_flush = 0
+                print(f"DEBUG: Smart flush completed - {self.messages_since_flush} messages in {current_time - self.last_flush_time:.2f}s")
+            except Exception as e:
+                print(f"DEBUG: Smart flush failed: {e}")
+        
+    def _force_flush(self):
+        """Force immediate flush for critical messages."""
+        if self.kafka_pipeline:
+            try:
+                self.kafka_pipeline.flush(timeout=10)
+                self.last_flush_time = time.time()
+                self.messages_since_flush = 0
+                print("DEBUG: Force flush completed")
+            except Exception as e:
+                print(f"DEBUG: Force flush failed: {e}")
+        
     def upload_to_s3(self, file_bytes: bytes, file_type: str = "image", retries: int = 2, delay: int = 1) -> Optional[str]:
         """Upload file bytes to S3 with dual bucket redundancy."""
         upload_retries = self.config.get("kafka_variables", {}).get("AWS_S3", {}).get("upload_retries", 3)
@@ -264,26 +313,36 @@ class KafkaHandler:
                         client.upload_fileobj(
                             io.BytesIO(file_bytes),
                             Bucket=config.get("BUCKET_NAME"),
-                            Key=unique_filename,
+                            Key=f"{config.get('video_fn')}{unique_filename}",
                             ExtraArgs={"ContentType": content_type},
                             Config=S3_TRANSFER_CONFIG
                         )
-                        # Return full S3 URL for videos
-                        region = config.get("region_name")
-                        bucket_name = config.get("BUCKET_NAME")
-                        s3_url = f"https://{bucket_name}.s3.{region}.amazonaws.com/{unique_filename}"
-                        print(f"DEBUG: Successfully uploaded video to {s3_name}: {s3_url}")
-                        return s3_url
-                    else:
+                        
+                        minio_url = f"http://{config.get('end_point_url')}/{config.get('BUCKET_NAME')}/{config.get('video_fn')}{unique_filename}"
+                        print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
+                        return minio_url
+                    elif file_type == "image":
                         # Use put_object for images
                         client.put_object(
                             Bucket=config.get("BUCKET_NAME"),
-                            Key=unique_filename,
+                            Key=f"{config.get('org_img_fn')}{unique_filename}",
                             Body=file_bytes,
                             ContentType=content_type
                         )
-                        print(f"DEBUG: Successfully uploaded {file_type} to {s3_name}: {config.get('BUCKET_NAME')}")
-                        return unique_filename
+                        minio_url = f"http://{config.get('end_point_url')}/{config.get('BUCKET_NAME')}/{config.get('org_img_fn')}{unique_filename}"
+                        print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
+                        return minio_url
+                    
+                    elif file_type == "snapshot":
+                        client.put_object(
+                            Bucket=config.get("BUCKET_NAME"),
+                            Key=f"{config.get('cgi_fn')}{unique_filename}",
+                            Body=file_bytes,
+                            ContentType=content_type
+                        )
+                        minio_url = f"http://{config.get('end_point_url')}/{config.get('BUCKET_NAME')}/{config.get('cgi_fn')}{unique_filename}"
+                        print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
+                        return minio_url
                         
                 except Exception as e:
                     print(f"DEBUG: S3 {file_type} upload attempt {attempt + 1} to {s3_name} failed: {e}")
@@ -309,11 +368,12 @@ class KafkaHandler:
     def _upload_video(self, video_bytes: bytes) -> tuple[str, Optional[str]]:
         """Upload video to S3."""
         return ("video", self.upload_to_s3(video_bytes, "video") if video_bytes else None)
-        
+    
     def process_events_queue(self, events_queue: queue.Queue, topic: str) -> bool:
+        #print("DEBUG","Running the Process Events Queue")
         """Process events from queue and send to Kafka with dual broker and S3 redundancy."""
         try:
-            message = events_queue.get(timeout=2)  # waits up to 2 seconds
+            message = events_queue.get(timeout=1)  # waits up to 2 seconds
             if message is None or topic == "None":
                 return True
                 
@@ -350,17 +410,32 @@ class KafkaHandler:
             # Send to Kafka only if ALL uploads succeeded
             if uploads_successful and self.kafka_pipeline:
                 try:
-                    self.kafka_pipeline.send(topic, message)
+                    print(topic,message,self.kafka_pipeline)
+                    future = self.kafka_pipeline.send(topic, message)
+                    
+                    # Wait for the message to be sent (with timeout)
+                    record_metadata = future.get(timeout=10)
+                    print(f"DEBUG: Message sent successfully to partition {record_metadata.partition} at offset {record_metadata.offset}")
+                    
+                    # Smart flush - only when needed
+                    self._smart_flush()
                     success = True
-                except (KafkaError, NoBrokersAvailable):
+                    print("DEBUG: Data Sent in Kafka Successfully")
+                    
+                except (KafkaError, NoBrokersAvailable) as e:
+                    print(f"DEBUG: Kafka send error: {e}")
                     self._handle_broker_failure()
                     if self.kafka_pipeline:
                         try:
-                            self.kafka_pipeline.send(topic, message)
+                            future = self.kafka_pipeline.send(topic, message)
+                            record_metadata = future.get(timeout=10)
+                            self._smart_flush()
                             success = True
-                        except Exception:
+                            print("DEBUG: Message sent successfully after broker failover")
+                        except Exception as retry_e:
+                            print(f"DEBUG: Retry send failed: {retry_e}")
                             pass
-
+				
             return success
                 
         except queue.Empty:
@@ -378,18 +453,23 @@ class KafkaHandler:
                 
             if self.kafka_pipeline:
                 try:
-                    self.kafka_pipeline.send(topic, message)
-                    self.kafka_pipeline.flush()
+                    future = self.kafka_pipeline.send(topic, message)
+                    record_metadata = future.get(timeout=10)
+                    self._smart_flush()
+                    print(f"DEBUG: Analytics message sent successfully to partition {record_metadata.partition}")
                     return True
                 except (KafkaError, NoBrokersAvailable) as e:
                     print(f"DEBUG: Kafka analytics send failed: {e}")
                     self._handle_broker_failure()
                     if self.kafka_pipeline:
                         try:
-                            self.kafka_pipeline.send(topic, message)
-                            self.kafka_pipeline.flush()
+                            future = self.kafka_pipeline.send(topic, message)
+                            record_metadata = future.get(timeout=10)
+                            self._smart_flush()
+                            print("DEBUG: Analytics message sent successfully after broker failover")
                             return True
-                        except:
+                        except Exception as retry_e:
+                            print(f"DEBUG: Analytics retry send failed: {retry_e}")
                             pass
             
             return False
@@ -454,6 +534,7 @@ class KafkaHandler:
         
         while True:
             try:
+                # print("DEBUG","Yes Kafka Loop running")
                 if self.kafka_pipeline is None:
                     self.kafka_pipeline = self._create_kafka_producer()
                     if self.kafka_pipeline is None:
@@ -482,7 +563,50 @@ class KafkaHandler:
             except (KafkaError, NoBrokersAvailable) as e:
                 print(f"DEBUG: Kafka connection error: {e}")
                 self._handle_broker_failure()
-                time.sleep(10)
+                time.sleep(5)
             except Exception as e:
                 print(f"DEBUG: Unexpected error in Kafka loop: {e}")
-                time.sleep(10) 
+                time.sleep(5)
+    
+    def close(self):
+        """Gracefully close the Kafka handler and cleanup resources."""
+        print("DEBUG: Closing Kafka handler...")
+        
+        try:
+            # Close the executor
+            if hasattr(self, 'executor'):
+                self.executor.shutdown(wait=False)
+                print("DEBUG: ThreadPoolExecutor closed")
+            
+            # Flush and close Kafka producer
+            if self.kafka_pipeline:
+                try:
+                    self._force_flush()  # Force flush all pending messages
+                    print("DEBUG: Kafka producer flushed")
+                except Exception as e:
+                    print(f"DEBUG: Error flushing Kafka producer: {e}")
+                
+                try:
+                    self.kafka_pipeline.close(timeout=10)
+                    print("DEBUG: Kafka producer closed")
+                except Exception as e:
+                    print(f"DEBUG: Error closing Kafka producer: {e}")
+                finally:
+                    self.kafka_pipeline = None
+            
+            # Close S3 clients
+            for name, client in self.s3_clients.items():
+                try:
+                    client.close()
+                    print(f"DEBUG: S3 client {name} closed")
+                except Exception as e:
+                    print(f"DEBUG: Error closing S3 client {name}: {e}")
+            
+            print("DEBUG: Kafka handler closed successfully")
+            
+        except Exception as e:
+            print(f"DEBUG: Error during Kafka handler close: {e}")
+    
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        self.close() 

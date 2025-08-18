@@ -4,6 +4,7 @@ set -euo pipefail
 # Configuration
 CONFIG_FILE="${1:-configuration.json}"
 MAX_RETRIES=999999  # Run indefinitely
+MAX_FAILED_ATTEMPTS=10  # Reboot after 10 failed attempts
 SLEEP_DELAYS=(60 300 600)  # 1 min, 5 min, 10 min in seconds
 DELAY_INDEX=0
 
@@ -104,7 +105,7 @@ run_detection() {
     
     # Run the detection pipeline
     print_status "Running: python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync --disable-display"
-    python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync --disable-display
+    python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync
 }
 
 # Function to get sleep delay
@@ -118,6 +119,7 @@ get_sleep_delay() {
 
 # Main loop
 attempt=1
+failed_attempts=0
 while [[ $attempt -le $MAX_RETRIES ]]; do
     print_status "=== Starting Detection Pipeline (Attempt $attempt) ==="
     
@@ -126,7 +128,24 @@ while [[ $attempt -le $MAX_RETRIES ]]; do
         print_success "Detection pipeline completed successfully"
         break
     else
-        print_warning "Detection pipeline exited with error (Attempt $attempt)"
+        failed_attempts=$((failed_attempts + 1))
+        print_warning "Detection pipeline exited with error (Attempt $attempt, Failed: $failed_attempts/$MAX_FAILED_ATTEMPTS)"
+        
+        # Check if we should reboot
+        if [[ $failed_attempts -ge $MAX_FAILED_ATTEMPTS ]]; then
+            print_error "CRITICAL: $failed_attempts failed attempts reached. Rebooting system in 30 seconds..."
+            print_error "This will attempt to resolve persistent system issues."
+            
+            # Countdown to reboot
+            for ((i=30; i>0; i--)); do
+                print_error "Rebooting in $i seconds... (Press Ctrl+C to cancel)"
+                sleep 1
+            done
+            
+            print_error "Rebooting system now..."
+            sudo reboot
+            exit 0
+        fi
         
         # Get sleep delay
         sleep_time=$(get_sleep_delay)

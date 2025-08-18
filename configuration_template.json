@@ -1,78 +1,81 @@
 {
-    "sensor_id": "your-sensor-id-here",
-    "default_arguments": {
-        "hef_path": "/path/to/your/model.hef",
-        "labels-json": "None"
+    "sensor_id":"SAIL_Test_Camera_1",
+    "default_arguments":{
+        "hef_path":"/home/arresto/SVDS/resources/models/hailo8l/yolov11s.hef",
+        "labels-json":"None"
     },
     "available_activities": ["traffic_overspeeding_distancewise"],
     "active_activities": ["traffic_overspeeding_distancewise"],
-    "kafka_variables": {
-        "bootstrap_servers": [
-            "your-primary-broker:9092",
-            "your-secondary-broker:9092"
+    "kafka_variables":{
+        "bootstrap_servers":[
+            "117.240.216.20:9092"
         ],
-        "primary_broker": "your-primary-broker:9092",
-        "secondary_broker": "your-secondary-broker:9092",
+        "primary_broker": "117.240.216.20:9092",
+        "secondary_broker": "117.240.216.20:9092",
         "broker_failover_timeout": 30,
         "send_analytics_pipeline": "aianalytics",
-        "send_events_pipeline": "aievents",
-        "log_topic": "log_topic",
-        "reset_threshold": 3000,
-        "AWS_S3": {
+        "send_events_pipeline":"svds_violation",
+        "log_topic":"error_log",
+        "reset_threshold":3000,
+        "AWS_S3":{
             "primary": {
-                "aws_access_key_id": "",
-                "aws_secret_access_key": "",
-                "region_name": "your-region",
-                "BUCKET_NAME": ""
+                "aws_access_key_id":"uZboBIRAKtvf",
+                "aws_secret_access_key":"DnVZnvUpsuKe",
+                "region_name":"ap-south-1",
+                "BUCKET_NAME":"speedviolations",
+                "org_img_fn":"violationoriginalimages/",
+                "video_fn":"videoclips/",
+                "cgi_fn":"cgisnapshots/",
+		"end_point_url":"117.240.216.20:9000"
             },
             "secondary": {
-                "aws_access_key_id": "",
-                "aws_secret_access_key": "",
-                "region_name": "your-region",
-                "BUCKET_NAME": ""
+                "aws_access_key_id":"AKIAZIVPFAMG3WFWECDN",
+                "aws_secret_access_key":"asUBIIZZAQhPEaPFflJJuCCO2dfy/Jkrz37wnSH3",
+                "region_name":"ap-south-1",
+                "BUCKET_NAME":"arrestovideo",
+                "org_img_fn":"violationoriginalimages/",
+                "video_fn":"videoclips/",
+                "cgi_fn":"cgisnapshots/",
+		"end_point_url":"117.240.216.20:9000"
             },
             "s3_failover_timeout": 30,
             "upload_retries": 3
         }
     },
-    "radar_config": {
-        "port": "/dev/ttyACM0",
-        "baudrate": 9600,
-        "max_age": 15,
-        "max_diff_rais": 12
+    "radar_config":{
+        "port":"/dev/ttyACM0",
+        "baudrate":9600,
+        "max_age": 10,
+        "max_diff_rais": 10
     },
     "camera_details": {
-        "RTSP_URL": "rtsp://username:password@camera-ip:554/stream",
-        "camera_ip": "your-camera-ip",
-        "username": "",
-        "password": "",
-        "IF_USB_CAMERA": "False",
-        "USB_CAM_INPUT": ""
+        "RTSP_URL":"rtsp://admin:arresto2024@192.168.1.234:554/cam/realmonitor?channel=1&subtype=0",
+        "camera_ip":"192.168.1.234",
+        "username":"admin",
+        "password":"arresto2024",
+        "IF_USB_CAMERA":"False",
+        "USB_CAM_INPUT":""
     },
-    "activities_data": {
+    "activities_data":{
         "traffic_overspeeding_distancewise": {
             "zones": {
-                "zone1": [[212,510],[2223,482],[2240,903],[33,936]]
+                "zone1": [[28,942],[2643,1037],[2620,1177],[39,1054]]
             },
             "parameters": {
                 "real_distance": 10,
                 "speed_limit": {
-                    "car": 20,
-                    "truck": 20,
-                    "motorcycle": 20
+                    "car": 20,"truck":20,"motorcycle":20
                 },
                 "calibration": 1.3668,
-                "radar_calibration": 1,
-                "lines": {
-                    "lane1": [[1439,409],[1187,992]]
-                }
+                "radar_calibration":1,
+                "lines": {"lane1":[[1304,925],[1232,1110]]}
             }
         }
     },
     "save_settings": {
         "save_snapshots": 0,
         "save_rtsp_images": 0,
-        "take_cgi_snapshots": 0
+	"take_cgi_snapshots": 1
     },
     "calibration_required": 2
-} 
+}

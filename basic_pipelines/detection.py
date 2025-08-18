@@ -3,6 +3,7 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import os
+import sys
 import numpy as np
 import cv2
 import hailo
@@ -49,7 +50,11 @@ class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
         self.new_variable = 42  # New variable example
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        # Optimized thread pool for I/O operations
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=6,  # More workers for parallel I/O
+            thread_name_prefix="detection_worker"
+        )
         
         # Camera Variables
         self.sensor_id = None
@@ -74,6 +79,9 @@ class user_app_callback_class(app_callback_class):
         self.last_n_frame_tracker_ids = None
         self.time_stamp = deque(maxlen=4)
         self.cleaning_time_for_events = time.time()
+        
+        # Frame monitoring (for external monitoring only)
+        self.frame_monitor_count = 0
 
         # Radar handler
         self.radar_handler = RadarHandler()
@@ -136,85 +144,69 @@ class user_app_callback_class(app_callback_class):
         asyncio.set_event_loop(self.main_loop)
         self.main_loop.run_forever()
         
-    async def trigger_snapshot_loop(self, xywh, class_name, sub_category, parameters, datetimestamp, confidence=1, anprimage=None):
-        # Run CPU-intensive operations in thread pool
-        loop = asyncio.get_event_loop()
-        
-        if sub_category == "Road Safety-Overspeeding":
-            try:
-                final_speed = parameters["speed"]
-                suffix = f"{class_name}_{final_speed}"
-                
-                # Run camera capture in thread pool
-                filename, cgi_snapshot = self.cam.capture(prefix=str(suffix))
-                
-                if hasattr(self, 'save_snapshots') and filename and cgi_snapshot:
-                    # Run file operations in thread pool
-                    await loop.run_in_executor(
-                        self.thread_pool,
-                        self._save_snapshot,
-                        filename, cgi_snapshot
-                    )
-            except Exception as e:
-                print(f"Error in snapshot capture: {e}")
-                if hasattr(self, 'kafka_handler') and self.kafka_handler:
-                    self.kafka_handler.send_error_log(f"Error in snapshot capture: {e}", sensor_id=self.sensor_id)    
-                # Error handling...
-        
-        # Run video generation in thread pool
-        video_bytes = await loop.run_in_executor(
-            self.thread_pool,
-            self.recorder.generate_video_bytes
-        )
-        
+    async def trigger_snapshot_loop(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None):
+        # Use existing main_loop instead of creating new one
         try:
-            if anprimage is not None:
-                # Convert from BGR to RGB
-                print("running anpr image ")
-                anprimage_rgb = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
-                image = encode_frame_to_bytes(anprimage_rgb, 100)
-                height, width = anprimage.shape[:2]
-                anpr_status = "True"
-                    
-            else:
-                frame_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
-                image = encode_frame_to_bytes(frame_rgb)
-                height, width = self.image.shape[:2]
-                anpr_status = "False"
-        
-            # Note: rtsp_image_path functionality moved to KafkaHandler
-            # Save RTSP images only if enabled
-            rtsp_image_path = None
-            if hasattr(self, 'save_rtsp_images') and self.save_rtsp_images:
-                # Choose a valid BGR image: prefer cropped ANPR image if provided, else full frame
-                img_for_rtsp = anprimage_rgb if anprimage is not None else self.image
-                print("Trying to Save RTSP")
-                rtsp_image_path = self.recorder.save_images(img_for_rtsp, "/home/arresto/SVDS2/original_croppings/", suffix)
-                print(rtsp_image_path)
+            final_speed = parameters["speed"]
+            suffix = f"{class_name}_{final_speed}"
             
+            # Keep camera capture as-is (temporary files)
+            filename, cgi_snapshot = None, None
+            if hasattr(self, 'cam') and self.cam:
+                filename, cgi_snapshot = self.cam.capture(prefix=str(suffix))
+            
+            if hasattr(self, 'save_snapshots') and filename and cgi_snapshot:
+                # Keep file saving as-is (temporary files)
+                await self.main_loop.run_in_executor(
+                    self.thread_pool,
+                    self._save_snapshot,
+                    filename, cgi_snapshot
+                )
         except Exception as e:
-            error_msg = f"Failed to save images from RTSP stream: {e}"
-            if hasattr(user_data, 'kafka_handler') and user_data.kafka_handler:
-                user_data.kafka_handler.send_error_log(error_msg, sensor_id=user_data.sensor_id)
-            
+            print(f"CRITICAL: Error in snapshot capture: {e}")
+            if hasattr(self, 'kafka_handler') and self.kafka_handler:
+                self.kafka_handler.send_error_log(f"Error in snapshot capture: {e}", sensor_id=self.sensor_id)
+            sys.exit(1)    
+        
+        # Generate video bytes first (with timeout)
+        video_bytes = None
+        try:
+            video_bytes = await asyncio.wait_for(
+                self.main_loop.run_in_executor(
+                    self.thread_pool,
+                    self.recorder.generate_video_bytes
+                ),
+                timeout=10.0  # 10-second timeout
+            )
+        except asyncio.TimeoutError:
+            pass  # Continue without video if timeout
+        except Exception as e:
+            print(f"CRITICAL: Video generation error: {e}")
+            if hasattr(self, 'kafka_handler') and self.kafka_handler:
+                self.kafka_handler.send_error_log(f"Video generation error: {e}", sensor_id=self.sensor_id)
+            sys.exit(1)
+        
+        # Lightweight image processing (immediate)
+        image, height, width, anpr_status = self._process_image_lightweight(anprimage)
+        
+        # Fire-and-forget RTSP save
+        if hasattr(self, 'save_rtsp_images') and self.save_rtsp_images:
+            asyncio.create_task(self._async_save_rtsp(anprimage, suffix))
+        
+        # Create message with complete data
         message = {
             "sensor_id": self.sensor_id,
             "org_img": image,
             "snap_shot": cgi_snapshot,
-            "video": video_bytes if video_bytes else None,
-            "absolute_bbox": [{"xywh": xywh, "class_name": class_name, "confidence": confidence, "subcategory": sub_category, "parameters": parameters, "anpr": anpr_status}],
+            "video": video_bytes,  # Video bytes ready before queuing
+            "absolute_bbox": {"xywh": xywh, "class_name": class_name, "confidence": confidence, "parameters": parameters, "anpr": anpr_status},
             "datetimestamp": datetimestamp,
             "imgsz": f"{width}:{height}",
             "color": "#FFFF00"
         }
-           
-        #image = Image.open(io.BytesIO(message["org_img"]))
-        #image.save(f'output_image{message["datetimestamp_trackerid"]}.jpg') 
-        # CRITICAL: Use non-blocking queue operations
-        try:
-            self.results_events_queue.put_nowait(message)
-        except queue.Full:
-            pass
+        
+        # Queue message with complete data
+        self._queue_message_non_blocking(message)
 
     def _save_snapshot(self, filename, cgi_snapshot):
         """Synchronous snapshot saving in thread pool."""
@@ -224,8 +216,49 @@ class user_app_callback_class(app_callback_class):
         with open(path, "wb") as f:
             f.write(cgi_snapshot)
     
-    def new_function(self):  # New function example
-        return "The meaning of life is: "
+
+    
+    def _process_image_lightweight(self, anprimage):
+        """Lightweight image processing without heavy operations."""
+        try:
+            if anprimage is not None:
+                # Minimal processing - just get dimensions
+                # Keep image in BGR format for OpenCV encoding
+                image = encode_frame_to_bytes(anprimage, 100)
+                height, width = anprimage.shape[:2]
+                anpr_status = "True"
+            else:
+                height, width = self.image.shape[:2]
+                image = encode_frame_to_bytes(self.image, 80)  # Lower quality for speed
+                anpr_status = "False"
+            return image, height, width, anpr_status
+        except Exception as e:
+            print(f"CRITICAL: Image processing error: {e}")
+            import sys
+            sys.exit(1)
+    
+    async def _async_save_rtsp(self, anprimage, suffix):
+        """Fire-and-forget RTSP image save."""
+        try:
+            img_for_rtsp = anprimage if anprimage is not None else self.image
+            await self.main_loop.run_in_executor(
+                self.thread_pool,
+                self.recorder.save_images,
+                img_for_rtsp, "/home/arresto/SVDS2/original_croppings/", suffix
+            )
+        except Exception as e:
+            print(f"CRITICAL: RTSP save error: {e}")
+            if hasattr(self, 'kafka_handler') and self.kafka_handler:
+                self.kafka_handler.send_error_log(f"RTSP save error: {e}", sensor_id=self.sensor_id)
+            sys.exit(1)
+    
+    def _queue_message_non_blocking(self, message):
+        """Non-blocking queue operation with minimal overhead."""
+        try:
+            if self.results_events_queue.qsize() < 100:  # Higher threshold
+                self.results_events_queue.put_nowait(message)
+        except queue.Full:
+            pass  # Silently drop if queue is full
     
 
 # -----------------------------------------------------------------------------------------------
@@ -248,8 +281,8 @@ class user_app_callback_class(app_callback_class):
             # Handle gracefully without blocking
             pass
 
-    def create_result_overspeeding_events(self, xywh, class_name, sub_category, parameters, datetimestamp_trackerid, confidence=1, anprimage=None):
-        asyncio.run_coroutine_threadsafe(self.trigger_snapshot_loop(xywh, class_name, sub_category, parameters, datetimestamp_trackerid, confidence, anprimage), self.main_loop)
+    def create_result_overspeeding_events(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None):
+        asyncio.run_coroutine_threadsafe(self.trigger_snapshot_loop(xywh, class_name, parameters, datetimestamp, confidence, anprimage), self.main_loop)
 
     def cleaning_events_data_with_last_frames(self):
         # Cleaning Violations
@@ -267,6 +300,7 @@ class user_app_callback_class(app_callback_class):
         vehicle_index = [i for i, cls in enumerate(self.classes) if cls in self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"].keys()]
         count = 0
         image=None
+        
         # �� MOST CRITICAL: Add this early exit
         if not vehicle_index:
             return 
@@ -295,8 +329,12 @@ class user_app_callback_class(app_callback_class):
                             distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             
                             speed = float(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])) * float(self.calibrate_class_wise[obj_class])
-                            radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
-                            print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
+                            try:
+                                radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
+                                print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
+                            except Exception as e:
+                                print(f"CRITICAL: Radar data retrieval error: {e}")
+                                sys.exit(1)
                             # Log speed data to text file
                             # try:
                             #     if radar_speed is None:
@@ -331,15 +369,15 @@ class user_app_callback_class(app_callback_class):
                 anprimage = crop_image_numpy(self.image, result["box"])
                 xywh = [0, 0, 100, 100]
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
-                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
+                self.create_result_overspeeding_events(xywh, obj_class, {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            if 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]) and result["radar_speed"] is None:
+            elif 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]) and result["radar_speed"] is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])
                 xywh = [0, 0, 100, 100]
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
-                self.create_result_overspeeding_events(xywh, obj_class, "Road Safety-Overspeeding", {"speed": result["speed"],"tag":"AI"}, datetimestamp, 1, anprimage)
+                self.create_result_overspeeding_events(xywh, obj_class, {"speed": result["speed"],"tag":"AI"}, datetimestamp, 1, anprimage)
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
@@ -353,9 +391,13 @@ def app_callback(pad, info, user_data,frame_type):
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Using the user_data to count the number of frames
-    user_data.increment()
-    string_to_print = f"Frame count: {user_data.get_count()}\n"
+    # Simple frame counter for external monitoring
+    user_data.frame_monitor_count += 1
+    
+    # Reset counter if it reaches 1000 to prevent overflow
+    if user_data.frame_monitor_count >= 1000:
+        user_data.frame_monitor_count = 0
+        print("INFO: Frame monitor counter reset to prevent overflow")
 
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
@@ -519,7 +561,9 @@ if __name__ == "__main__":
             )
             user_data.radar_handler.start_radar()
         except Exception as e:
+            print(f"CRITICAL: Failed to initialize radar: {e}")
             kafka_handler.send_error_log(f"Failed to initialize radar: {e}", sensor_id=config.get("sensor_id"))
+            sys.exit(1)
         
     # Snapshot if configured
     if "camera_details" in config:
