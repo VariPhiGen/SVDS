@@ -19,8 +19,8 @@
         "reset_threshold":3000,
         "AWS_S3":{
             "primary": {
-                "aws_access_key_id":"uZboBIRAKtvf",
-                "aws_secret_access_key":"DnVZnvUpsuKe",
+                "aws_access_key_id":"",
+                "aws_secret_access_key":"",
                 "region_name":"ap-south-1",
                 "BUCKET_NAME":"speedviolations",
                 "org_img_fn":"violationoriginalimages/",
@@ -29,8 +29,8 @@
 		"end_point_url":"117.240.216.20:9000"
             },
             "secondary": {
-                "aws_access_key_id":"AKIAZIVPFAMG3WFWECDN",
-                "aws_secret_access_key":"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",
+                "aws_access_key_id":"",
+                "aws_secret_access_key":"",
                 "region_name":"ap-south-1",
                 "BUCKET_NAME":"arrestovideo",
                 "org_img_fn":"violationoriginalimages/",
