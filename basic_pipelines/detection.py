@@ -223,7 +223,7 @@ class user_app_callback_class(app_callback_class):
         try:
             if anprimage is not None:
                 # Minimal processing - just get dimensions
-                # Keep image in BGR format for OpenCV encoding
+                anprimage_rgb = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
                 image = encode_frame_to_bytes(anprimage, 100)
                 height, width = anprimage.shape[:2]
                 anpr_status = "True"
@@ -240,7 +240,7 @@ class user_app_callback_class(app_callback_class):
     async def _async_save_rtsp(self, anprimage, suffix):
         """Fire-and-forget RTSP image save."""
         try:
-            img_for_rtsp = anprimage if anprimage is not None else self.image
+            img_for_rtsp = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB) if anprimage is not None else self.image
             await self.main_loop.run_in_executor(
                 self.thread_pool,
                 self.recorder.save_images,
@@ -397,7 +397,7 @@ def app_callback(pad, info, user_data,frame_type):
     # Reset counter if it reaches 1000 to prevent overflow
     if user_data.frame_monitor_count >= 1000:
         user_data.frame_monitor_count = 0
-        print("INFO: Frame monitor counter reset to prevent overflow")
+        #print("INFO: Frame monitor counter reset to prevent overflow")
 
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)

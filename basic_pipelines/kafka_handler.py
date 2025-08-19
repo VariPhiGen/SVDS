@@ -410,7 +410,7 @@ class KafkaHandler:
             # Send to Kafka only if ALL uploads succeeded
             if uploads_successful and self.kafka_pipeline:
                 try:
-                    print(topic,message,self.kafka_pipeline)
+                    #print("DEBUG",topic,message,self.kafka_pipeline)
                     future = self.kafka_pipeline.send(topic, message)
                     
                     # Wait for the message to be sent (with timeout)

@@ -48,14 +48,15 @@ def encode_frame_to_bytes(image: np.ndarray, quality: int = 95) -> bytes:
     Encode frame to bytes.
     
     Args:
-        image: Image as numpy array (BGR format for OpenCV)
+        image: Image as numpy array
         quality: JPEG quality (1-100)
+        anpr: Optional ANPR image
         
     Returns:
         Image as bytes
     """
     if quality < 100:
-        # Use quality parameter for JPEG encoding
+        # Convert from BGR to RGB
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
         _, buffer = cv2.imencode('.jpg', image, encode_param)
     else:
