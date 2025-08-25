@@ -105,8 +105,7 @@ echo "🔌 Setting up device access..."
 # Create udev rules for radar devices
 cat << 'EOF' | sudo tee /etc/udev/rules.d/99-radar.rules
 # Radar device rules
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", MODE="0666",SYMLINK+="ttyACM0"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1d6b", ATTRS{idProduct}=="0002", MODE="0666",SYMLINK+="ttyACM0"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", MODE="0666",SYMLINK+="ttyACMr"
 EOF
 
 
