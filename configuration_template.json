@@ -1,7 +1,7 @@
 {
     "sensor_id": "SENSOR_ID_PLACEHOLDER",
     "default_arguments": {
-      "hef_path": "/path/to/model/file.hef",
+      "hef_path": "/home/arresto/SVDS/resources/models/hailo8l/yolov11s.hef",
       "labels-json": "None"
     },
     "available_activities": [
@@ -55,7 +55,7 @@
     "camera_details": {
       "RTSP_URL": "rtsp://USERNAME:PASSWORD@CAMERA_IP:554/cam/realmonitor?channel=1&subtype=0",
       "camera_ip": "CAMERA_IP",
-      "username": "USERNAME_PLACEHOLDER",
+      "username": "admin",
       "password": "PASSWORD_PLACEHOLDER",
       "IF_USB_CAMERA": "False",
       "USB_CAM_INPUT": ""
