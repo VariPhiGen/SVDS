@@ -358,7 +358,7 @@ class RadarHandler:
         rank1=False
         for radar_speeds, rank_name in rank_configs:
             # Filter speeds above threshold - more efficient with list comprehension
-            if rank_name is "rank1":
+            if rank_name == "rank1":
                 valid_speeds = [(ts, speed) for ts, speed in radar_speeds if ts > self.lr1t]
             else:
                 valid_speeds = [(ts, speed) for ts, speed in radar_speeds if (speed-ai_speed) < self.max_diff_rais]

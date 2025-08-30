@@ -47,7 +47,7 @@
       }
     },
     "radar_config": {
-      "port": "/dev/ttyACM0",
+      "port": "/dev/ttyACMr",
       "baudrate": 9600,
       "max_age": 10,
       "max_diff_rais": 10
