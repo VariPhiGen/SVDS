@@ -367,7 +367,7 @@ class RadarHandler:
                 # Get earliest timestamp (best match)
                 best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
                 
-                if len(valid_speeds)==1 and rank_name is "rank1":
+                if len(valid_speeds)==1 and rank_name == "rank1":
                   rank1=True
                   
 				# Remove used speed
