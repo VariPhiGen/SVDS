@@ -224,12 +224,13 @@ class user_app_callback_class(app_callback_class):
             if anprimage is not None:
                 # Minimal processing - just get dimensions
                 anprimage_rgb = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
-                image = encode_frame_to_bytes(anprimage, 100)
+                image = encode_frame_to_bytes(anprimage_rgb, 100)
                 height, width = anprimage.shape[:2]
                 anpr_status = "True"
             else:
+                image_rgb=cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
                 height, width = self.image.shape[:2]
-                image = encode_frame_to_bytes(self.image, 80)  # Lower quality for speed
+                image = encode_frame_to_bytes(image_rgb, 80)  # Lower quality for speed
                 anpr_status = "False"
             return image, height, width, anpr_status
         except Exception as e:
@@ -329,7 +330,6 @@ class user_app_callback_class(app_callback_class):
                             distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             
                             speed = float(int(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])*float(self.calibrate_class_wise[obj_class])))
-                            
                             try:
                                 radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
                                 print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
