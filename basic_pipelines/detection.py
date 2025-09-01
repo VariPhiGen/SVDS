@@ -570,11 +570,12 @@ if __name__ == "__main__":
     if "camera_details" in config:
         try:
             cam_config = config["camera_details"]
-            user_data.cam = Snapshot(
-                camera_ip=cam_config.get("camera_ip"),
-                user=cam_config.get("username"),
-                pwd=cam_config.get("password")
-            )
+            if bool(save_settings.get("take_cgi_snapshots", 0)):
+                user_data.cam = Snapshot(
+                    camera_ip=cam_config.get("camera_ip"),
+                    user=cam_config.get("username"),
+                    pwd=cam_config.get("password")
+                )
         except Exception as e:
             kafka_handler.send_error_log(f"Failed to initialize camera: {e}", sensor_id=config.get("sensor_id"))
     
