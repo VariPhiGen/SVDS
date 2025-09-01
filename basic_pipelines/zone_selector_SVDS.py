@@ -80,8 +80,11 @@ class ZoneDrawer:
         print("✅ Saved image with polygon and line to org_img.png")
 
     def run(self):
+        frame = None
         while True:
-            ret, frame = self.cap.read()
+            if frame is None:
+                ret, frame = self.cap.read()
+            
             if not ret:
                 break
 
