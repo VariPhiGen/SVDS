@@ -108,6 +108,11 @@ class user_app_callback_class(app_callback_class):
         # Run Triggering Loop for raving Camera Snapshot
         self.cam = None
         
+        # Initialize cropping directory path once
+        self.cropping_dir = os.path.join(os.getcwd(), "SVDS2", "original_croppings")
+        # Create directory if it doesn't exist
+        os.makedirs(self.cropping_dir, exist_ok=True)
+        
         self.main_loop = asyncio.new_event_loop()
         self.asyncio_thread = Thread(target=self.start_asyncio_loop, daemon=True)
         self.asyncio_thread.start()
@@ -245,7 +250,7 @@ class user_app_callback_class(app_callback_class):
             await self.main_loop.run_in_executor(
                 self.thread_pool,
                 self.recorder.save_images,
-                img_for_rtsp, "/home/arresto/SVDS2/original_croppings/", suffix
+                img_for_rtsp, self.cropping_dir, suffix
             )
         except Exception as e:
             print(f"CRITICAL: RTSP save error: {e}")

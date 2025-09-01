@@ -107,7 +107,7 @@ class VideoClipRecorder:
     def save_images(self, org_img, save_dir: str, suffix: str):
         """Save a decoded OpenCV image (`numpy.ndarray`, dtype uint8, BGR)."""
         try:
-            os.makedirs(save_dir, exist_ok=True)
+            
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             org_path = os.path.join(save_dir, f"org_img_{timestamp}_{suffix}.jpg")
 
