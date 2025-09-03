@@ -21,6 +21,8 @@ class RadarHandler:
         self.rank1_radar_speeds = deque()
         self.rank2_radar_speeds = deque()
         self.rank3_radar_speeds = deque()
+        self.rankl_radar_speeds = deque()
+        self.latest_radar_speed = None
         self.ser = None
         self.is_calibrating = {}
         self.lr1t=time.time()
@@ -235,7 +237,7 @@ class RadarHandler:
     
     def _radar_read_loop(self):
         """Main radar reading loop running in a separate thread."""
-        previous_reading = None
+        previous_reading = 0
         last_connectivity_check = time.time()
         
         try:
@@ -260,8 +262,12 @@ class RadarHandler:
                         try:
                             
                             # Reset counter if speed difference is too large
-                            if previous_reading is not None and abs(speed - previous_reading) > 4:
+                            if previous_reading !=0 and abs(speed - previous_reading) > 4:
                                 self.count_radar = 0
+                                self._add_speed_to_rank(previous_reading, self.rankl_radar_speeds, current_time)
+                                    
+                                
+
                             
                             previous_reading = speed
                             

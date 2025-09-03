@@ -20,6 +20,8 @@ from datetime import datetime
 import time
 import asyncio
 import argparse
+import atexit
+import signal
 from snapshotapi import Snapshot
 
 # Local modules
@@ -445,7 +447,7 @@ def app_callback(pad, info, user_data,frame_type):
         tracker_ids=[]
         anchor_points_original=[]
         
-        if user_data.ratio is None:
+        if user_data.ratio is None and user_data.original_width is not None:
             user_data.ratio=min(width/user_data.original_width,height/user_data.original_height)
             user_data.padx=int((width - user_data.original_width*user_data.ratio)/2)
             user_data.pady=int((height - user_data.original_height*user_data.ratio)/2)
@@ -493,6 +495,26 @@ def app_callback(pad, info, user_data,frame_type):
 
     return Gst.PadProbeReturn.OK
 
+def cleanup_resources():
+    """Clean up resources before exiting."""
+    print("\n🔄 Cleaning up resources...")
+    
+    try:
+        # Close Kafka handler
+        if 'kafka_handler' in globals():
+            print("📡 Closing Kafka handler...")
+            kafka_handler.close()
+        
+        # Stop radar if running
+        if 'user_data' in globals() and hasattr(user_data, 'radar_handler'):
+            print("📡 Stopping radar handler...")
+            user_data.radar_handler.stop_radar()
+        
+        print("✅ Cleanup completed")
+        
+    except Exception as e:
+        print(f"❌ Error during cleanup: {e}")
+
 if __name__ == "__main__":
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -500,6 +522,18 @@ if __name__ == "__main__":
     os.environ["HAILO_ENV_FILE"] = env_path_str
     # Logging is disabled - all errors sent to Kafka
     setup_logging()
+
+    # Register cleanup on exit
+    atexit.register(cleanup_resources)
+    
+    # Handle Ctrl+C gracefully
+    def signal_handler(signum, frame):
+        print("\n⚠️  Received interrupt signal, cleaning up...")
+        cleanup_resources()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     # Create an instance of the user app callback class
     user_data = user_app_callback_class()
@@ -661,4 +695,15 @@ if __name__ == "__main__":
     user_data.active_methods=active_methods
     
     app = GStreamerDetectionApp(app_callback, user_data)
-    app.run()
+    
+    try:
+        print("🚀 Starting SVDS detection system...")
+        print("💡 Press Ctrl+C to stop gracefully")
+        app.run()
+    except KeyboardInterrupt:
+        print("\n⚠️  Keyboard interrupt received")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+    finally:
+        print("🧹 Final cleanup...")
+        cleanup_resources()

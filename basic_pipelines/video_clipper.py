@@ -9,14 +9,6 @@ import io
 import av
 import gc
 
-# Try to import ffmpeg, fallback to OpenCV if not available
-try:
-    import ffmpeg
-    FFMPEG_AVAILABLE = True
-except ImportError:
-    print("WARNING: ffmpeg-python not available, using OpenCV fallback for video encoding")
-    FFMPEG_AVAILABLE = False
-
 
 class VideoClipRecorder:
     def __init__(self, maxlen=60, fps=20, prefix: str = "clips"):

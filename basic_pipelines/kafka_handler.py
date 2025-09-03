@@ -373,7 +373,7 @@ class KafkaHandler:
         #print("DEBUG","Running the Process Events Queue")
         """Process events from queue and send to Kafka with dual broker and S3 redundancy."""
         try:
-            message = events_queue.get(timeout=1)  # waits up to 2 seconds
+            message = events_queue.get(timeout=1)  # waits up to 1 seconds
             if message is None or topic == "None":
                 return True
                 
