@@ -606,7 +606,3 @@ class KafkaHandler:
             
         except Exception as e:
             print(f"DEBUG: Error during Kafka handler close: {e}")
-    
-    def __del__(self):
-        """Destructor to ensure cleanup."""
-        self.close() 

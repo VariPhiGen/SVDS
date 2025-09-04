@@ -20,7 +20,7 @@ def serialize_image(image: np.ndarray) -> str:
         image: Image as numpy array
         
     Returns:
-        Base64 encoded image string
+        Base64 encoded image string 
     """
     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
     _, buffer = cv2.imencode('.jpeg', image, encode_param)

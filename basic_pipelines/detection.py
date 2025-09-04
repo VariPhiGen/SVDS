@@ -261,12 +261,40 @@ class user_app_callback_class(app_callback_class):
             sys.exit(1)
     
     def _queue_message_non_blocking(self, message):
-        """Non-blocking queue operation with minimal overhead."""
+        """Drop old messages to make space for new ones when queue is full."""
         try:
-            if self.results_events_queue.qsize() < 100:  # Higher threshold
+            queue_size = self.results_events_queue.qsize()
+            
+            # If queue is getting full, drop old messages to make space
+            if queue_size >= 80:
+                try:
+                    # Drop oldest message to make space for new one
+                    old_message = self.results_events_queue.get_nowait()
+                    print(f"🗑️  Dropped old message to make space for new data")
+                except queue.Empty:
+                    pass  # Queue was cleared by another thread
+                
+                # Now add the new message
                 self.results_events_queue.put_nowait(message)
+                print(f"✅ Added new message for after dropping old one")
+                return
+            
+            # Normal case: add message if queue has space
+            self.results_events_queue.put_nowait(message)
+            
         except queue.Full:
-            pass  # Silently drop if queue is full
+            # Last resort: force drop old message and add new one
+            try:
+                old_message = self.results_events_queue.get_nowait()
+                
+                
+                # Add new message
+                self.results_events_queue.put_nowait(message)
+
+                
+            except Exception as e:
+                print(f"❌ Failed to replace message: {e}")
+                # Silently drop if all else fails
     
 
 # -----------------------------------------------------------------------------------------------
