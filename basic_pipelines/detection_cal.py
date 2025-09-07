@@ -372,9 +372,9 @@ class user_app_callback_class(app_callback_class):
                                 if counter_data==0:
                                     print("Its not aligned, Make it in range")
                                 elif counter_data>=4:
-                                    print("Make Radar Move left: Use Motorcycle as Reference Please, Right now its ",obj_class)
+                                    print("Make Radar Move left: Use Motorcycle as Reference Please, Right now its ",obj_class,counter_data)
                                 elif counter_data<4 :
-                                    print("Make Radar Move Right: Use Motorcycle as Reference Please, Right now its ",obj_class)
+                                    print("Make Radar Move Right: Use Motorcycle as Reference Please, Right now its ",obj_class,counter_data)
                                 print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
                             except Exception as e:
                                 print(f"CRITICAL: Radar data retrieval error: {e}")
