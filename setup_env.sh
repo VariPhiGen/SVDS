@@ -15,9 +15,9 @@ VENV_NAME="SVDS"
 
 # Function to check if the script is being sourced
 is_sourced() {
-    if [ -n "$ZSH_VERSION" ]; then
+    if [ -n "${ZSH_VERSION:-}" ]; then
         [[ -o sourced ]]
-    elif [ -n "$BASH_VERSION" ]; then
+    elif [ -n "${BASH_VERSION:-}" ]; then 
         [[ "${BASH_SOURCE[0]}" != "$0" ]]
     else
         echo "Unsupported shell. Please use bash or zsh."
@@ -45,25 +45,31 @@ check_kernel_version() {
 }
 
 # Only proceed if the script is being sourced
-if is_sourced; then
-    echo "Setting up the environment..."
-    echo "Checking kernel version..."
-    # Call the kernel version check function
-    check_kernel_version || {
-        echo "Exiting due to incompatible kernel version."
-        return 1
-    }
+# Detect if running under systemd / non-interactive shell
+if [ -n "${INVOCATION_ID:-}" ] || [ ! -t 0 ]; then
+    echo "Running under systemd or non-interactive shell — skipping is_sourced check"
+    check_kernel_version || exit 1
 else
-    echo "This script should be sourced, not executed directly."
-    exit 1
+    if is_sourced; then
+        echo "Setting up the environment..."
+        echo "Checking kernel version..."
+        check_kernel_version || {
+            echo "Exiting due to incompatible kernel version."
+            return 1
+        }
+    else
+        echo "This script should be sourced, not executed directly."
+        exit 1
+    fi
 fi
+
 
 # Get the absolute path of the project's root directory (where this script is located).
 PROJECT_ROOT=$(pwd)
 
 # Prepend the project root to the PYTHONPATH.
 # This ensures our project's modules are found first.
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
 echo "Project directory added to PYTHONPATH for this session:"
 echo "${PROJECT_ROOT}"

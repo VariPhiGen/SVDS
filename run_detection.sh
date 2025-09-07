@@ -105,7 +105,7 @@ run_detection() {
     
     # Run the detection pipeline
     print_status "Running: python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync --disable-display"
-    python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync
+    python basic_pipelines/detection.py --i $RTSP_LINK --disable-sync --disable-display
 }
 
 # Function to get sleep delay

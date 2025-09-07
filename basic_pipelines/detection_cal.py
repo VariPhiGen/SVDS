@@ -26,7 +26,7 @@ from snapshotapi import Snapshot
 
 # Local modules
 from kafka_handler import KafkaHandler
-from radar_handler import RadarHandler
+from radar_handler_cal import RadarHandler
 from helper_utils import (
     setup_logging, encode_frame_to_bytes, is_vehicle_in_zone, crop_image_numpy,
     closest_line_projected_distance, get_unique_tracker_ids, calculate_distance
@@ -141,6 +141,7 @@ class user_app_callback_class(app_callback_class):
             self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
         elif (time.time()-self.ccai) > 300:
             self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
+            self.ccai=time.time()
         # Reset input values efficiently
         # Use assignment to None
         cs["speed"] = cs["radar"] = cs["class_name"] = None
@@ -170,6 +171,7 @@ class user_app_callback_class(app_callback_class):
                     filename, cgi_snapshot
                 )
         except Exception as e:
+            print(f"CRITICAL: Error in snapshot capture: {e}")
             if hasattr(self, 'kafka_handler') and self.kafka_handler:
                 self.kafka_handler.send_error_log(f"Error in snapshot capture: {e}", sensor_id=self.sensor_id)
             sys.exit(1)    
@@ -187,6 +189,7 @@ class user_app_callback_class(app_callback_class):
         except asyncio.TimeoutError:
             pass  # Continue without video if timeout
         except Exception as e:
+            print(f"CRITICAL: Video generation error: {e}")
             if hasattr(self, 'kafka_handler') and self.kafka_handler:
                 self.kafka_handler.send_error_log(f"Video generation error: {e}", sensor_id=self.sensor_id)
             sys.exit(1)
@@ -239,6 +242,7 @@ class user_app_callback_class(app_callback_class):
                 anpr_status = "False"
             return image, height, width, anpr_status
         except Exception as e:
+            print(f"CRITICAL: Image processing error: {e}")
             import sys
             sys.exit(1)
     
@@ -252,6 +256,7 @@ class user_app_callback_class(app_callback_class):
                 img_for_rtsp, self.cropping_dir, suffix
             )
         except Exception as e:
+            print(f"CRITICAL: RTSP save error: {e}")
             if hasattr(self, 'kafka_handler') and self.kafka_handler:
                 self.kafka_handler.send_error_log(f"RTSP save error: {e}", sensor_id=self.sensor_id)
             sys.exit(1)
@@ -266,11 +271,13 @@ class user_app_callback_class(app_callback_class):
                 try:
                     # Drop oldest message to make space for new one
                     old_message = self.results_events_queue.get_nowait()
+                    print(f"🗑️  Dropped old message to make space for new data")
                 except queue.Empty:
                     pass  # Queue was cleared by another thread
                 
                 # Now add the new message
                 self.results_events_queue.put_nowait(message)
+                print(f"✅ Added new message for after dropping old one")
                 return
             
             # Normal case: add message if queue has space
@@ -358,14 +365,36 @@ class user_app_callback_class(app_callback_class):
                         if projected_distance > (0.3*self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]):
                             distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             
-                            speed = float(int(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])*float(self.calibrate_class_wise[obj_class])))
+                            speed = (distance*3.6*self.calibrate_class_wise[obj_class]) / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])
+                            speed = round(speed,1)
                             try:
-                                radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
+                                radar_speed,rank1,counter_data = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
+                                if counter_data==0:
+                                    print("Its not aligned, Make it in range")
+                                elif counter_data>=4:
+                                    print("Make Radar Move left: Use Motorcycle as Reference Please, Right now its ",obj_class)
+                                elif counter_data<4 :
+                                    print("Make Radar Move Right: Use Motorcycle as Reference Please, Right now its ",obj_class)
+                                print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
                             except Exception as e:
                                 print(f"CRITICAL: Radar data retrieval error: {e}")
                                 sys.exit(1)
-                            
-                            if radar_speed is not None and speed != 0 and rank1 and radar_speed !=0:
+                            # Log speed data to text file
+                            # try:
+                            #     if radar_speed is None:
+                            #         rt=0
+                            #     else:
+                            #         rt=radar_speed
+                            #     timestamp = datetime.now(self.ist_timezone).strftime("%Y-%m-%d %H:%M:%S")
+                            #     log_entry = f"{timestamp} - Tracker: {tracker_id}, Class: {obj_class}, AI_Speed: {speed:.2f} km/h, Radar_Speed: {rt:.2f} km/h, Lane: {lane_name}, calbiration: {self.radar_handler.is_calibrating[obj_class]}\n"
+                                
+                            #     # Write to single log file
+                            #     log_filename = "./speed_log.txt"
+                            #     with open(log_filename, "a", encoding="utf-8") as log_file:
+                            #         log_file.write(log_entry)
+                            # except Exception as e:
+                            #     print(f"Error writing to speed log file: {e}")
+                            if radar_speed is not None and speed != 0 and rank1 and radar_speed != 0 :
                                 self.calibrate_speed["speed"] = speed
                                 self.calibrate_speed["class_name"] = obj_class
                                 self.calibrate_speed["radar"] = radar_speed
@@ -386,7 +415,7 @@ class user_app_callback_class(app_callback_class):
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
                 self.create_result_overspeeding_events(xywh, obj_class, {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            elif 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]])+5 and result["radar_speed"] is None:
+            elif 75 > result["speed"] > ((self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]) and result["radar_speed"]+5) is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])
@@ -504,6 +533,7 @@ def app_callback(pad, info, user_data,frame_type):
 
 def cleanup_resources():
     """Clean up resources before exiting."""
+    print("\n🔄 Cleaning up resources...")
     
     try:
         # Close Kafka handler
@@ -558,6 +588,7 @@ if __name__ == "__main__":
         # Check if hef_path exists and is not None/empty
         if hef_path and hef_path != "None" and os.path.exists(hef_path):
             user_data.hef_path = hef_path
+            print(f"✅ Using HEF file: {hef_path}")
         else:
             user_data.hef_path = None
             print(f"⚠️  HEF file not found or invalid: {hef_path}")
@@ -565,6 +596,7 @@ if __name__ == "__main__":
         # Check if labels_json exists and is not None/empty
         if labels_json and labels_json != "None" and os.path.exists(labels_json):
             user_data.labels_json = labels_json
+            print(f"✅ Using labels file: {labels_json}")
         else:
             user_data.labels_json = None
             print(f"⚠️  Labels file not found or invalid: {labels_json}")

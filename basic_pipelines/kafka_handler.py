@@ -268,7 +268,7 @@ class KafkaHandler:
                 self.kafka_pipeline.flush(timeout=5)
                 self.last_flush_time = current_time
                 self.messages_since_flush = 0
-                print(f"DEBUG: Smart flush completed - {self.messages_since_flush} messages in {current_time - self.last_flush_time:.2f}s")
+                #print(f"DEBUG: Smart flush completed - {self.messages_since_flush} messages in {current_time - self.last_flush_time:.2f}s")
             except Exception as e:
                 print(f"DEBUG: Smart flush failed: {e}")
         
@@ -279,7 +279,7 @@ class KafkaHandler:
                 self.kafka_pipeline.flush(timeout=10)
                 self.last_flush_time = time.time()
                 self.messages_since_flush = 0
-                print("DEBUG: Force flush completed")
+                #print("DEBUG: Force flush completed")
             except Exception as e:
                 print(f"DEBUG: Force flush failed: {e}")
         
@@ -319,7 +319,7 @@ class KafkaHandler:
                         )
                         
                         minio_url = f"http://{config.get('end_point_url')}/{config.get('BUCKET_NAME')}/{config.get('video_fn')}{unique_filename}"
-                        print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
+                        #print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
                         return minio_url
                     elif file_type == "image":
                         # Use put_object for images
@@ -330,7 +330,7 @@ class KafkaHandler:
                             ContentType=content_type
                         )
                         minio_url = f"http://{config.get('end_point_url')}/{config.get('BUCKET_NAME')}/{config.get('org_img_fn')}{unique_filename}"
-                        print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
+                        #print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
                         return minio_url
                     
                     elif file_type == "snapshot":
@@ -341,7 +341,7 @@ class KafkaHandler:
                             ContentType=content_type
                         )
                         minio_url = f"http://{config.get('end_point_url')}/{config.get('BUCKET_NAME')}/{config.get('cgi_fn')}{unique_filename}"
-                        print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
+                        #print(f"DEBUG: Successfully uploaded video to {s3_name}: {minio_url}")
                         return minio_url
                         
                 except Exception as e:

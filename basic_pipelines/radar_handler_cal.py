@@ -268,7 +268,7 @@ class RadarHandler:
                                 else:
                                     self.flag=0
                             previous_reading = speed
-                            self.latest_radar_speed.append((time.time(),speed))
+                            self.latest_radar_speed.append((time.time(),speed,self.count_radar))
                             if speed != 0:
                                 self.count_radar += 1
                                 current_time = time.time()
@@ -325,7 +325,8 @@ class RadarHandler:
                 return rs,r1
             # Normal mode: try each rank in order
             rs,r1=self._get_best_match_from_ranks(ai_speed, min_speed)
-            return rs,r1
+            current_counter=self.latest_radar_speed[0][2]
+            return rs,r1,current_counter
 
     def _handle_calibration_mode(self, ai_speed, obj_class, min_speed):
         """

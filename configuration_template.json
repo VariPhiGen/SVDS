@@ -91,7 +91,7 @@
     "save_settings": {
       "save_snapshots": 0,
       "save_rtsp_images": 0,
-      "take_cgi_snapshots": 1
+      "take_cgi_snapshots": 0
     },
     "calibration_required": 2
   }
