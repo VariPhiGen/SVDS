@@ -25,7 +25,7 @@ import signal
 from snapshotapi import Snapshot
 
 # Local modules
-from kafka_handler import KafkaHandler
+from kafka_handler_cal import KafkaHandler
 from radar_handler_cal import RadarHandler
 from helper_utils import (
     setup_logging, encode_frame_to_bytes, is_vehicle_in_zone, crop_image_numpy,
