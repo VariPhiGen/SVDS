@@ -416,7 +416,7 @@ class user_app_callback_class(app_callback_class):
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
                 self.create_result_overspeeding_events(xywh, obj_class, {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            elif 75 > result["speed"] > ((self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]) and result["radar_speed"]+5) is None:
+            elif 75 > result["speed"] > ((self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]+5) and result["radar_speed"]) is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])
