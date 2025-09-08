@@ -375,7 +375,7 @@ class user_app_callback_class(app_callback_class):
                                     elif counter_data>=4:
                                         print("Move Radar **left** Use Motorcycle as Reference Please, Right now its ",obj_class,counter_data)
                                     elif counter_data<4 :
-                                        print("Move Radar **Right** Use Motorcycle as Reference Please, Right now its ",obj_class,counter_data)
+                                        print("Move Radar **Right** Use Motorcycle as Reference Please, Right now Vehicle is",obj_class," Counter Number is ", counter_data)
                                 print( " Radar and AI Speed with Tracker and Class",radar_speed, speed, tracker_id,obj_class)
                             except Exception as e:
                                 print(f"CRITICAL: Radar data retrieval error: {e}")

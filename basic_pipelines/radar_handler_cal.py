@@ -380,7 +380,7 @@ class RadarHandler:
                     result=radar_speeds + self.latest_radar_speed
                 else:
                     result=radar_speeds
-                print("Result fron rankl Best Match",result)
+                #print("Result fron rankl Best Match",result)
                 valid_speeds = [(ts, speed) for ts, speed in result if ts > self.lr1t and speed > min_speed]
             else:
                 valid_speeds = [(ts, speed) for ts, speed in radar_speeds if (speed-ai_speed) < self.max_diff_rais and speed > min_speed]
