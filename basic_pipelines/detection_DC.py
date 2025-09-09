@@ -151,7 +151,7 @@ class user_app_callback_class(app_callback_class):
         asyncio.set_event_loop(self.main_loop)
         self.main_loop.run_forever()
         
-    async def trigger_snapshot_loop(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None):
+    async def trigger_snapshot_loop(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None,rtsp_image=None):
         # Use existing main_loop instead of creating new one
         try:
             final_speed = parameters["speed"]
@@ -195,7 +195,7 @@ class user_app_callback_class(app_callback_class):
         image, height, width, anpr_status = self._process_image_lightweight(anprimage)
         
         # Fire-and-forget RTSP save
-        asyncio.create_task(self._async_save_rtsp(self.image, suffix))
+        asyncio.create_task(self._async_save_rtsp(rtsp_image, suffix))
         
         # Create message with complete data
         message = {
@@ -311,7 +311,8 @@ class user_app_callback_class(app_callback_class):
             pass
 
     def create_result_overspeeding_events(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None):
-        asyncio.run_coroutine_threadsafe(self.trigger_snapshot_loop(xywh, class_name, parameters, datetimestamp, confidence, anprimage), self.main_loop)
+        
+        asyncio.run_coroutine_threadsafe(self.trigger_snapshot_loop(xywh, class_name, parameters, datetimestamp, confidence, anprimage,self.image), self.main_loop)
 
     def cleaning_events_data_with_last_frames(self):
         # Cleaning Violations
