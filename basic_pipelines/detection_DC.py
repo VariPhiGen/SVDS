@@ -234,7 +234,7 @@ class user_app_callback_class(app_callback_class):
             else:
                 image_rgb=cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
                 height, width = self.image.shape[:2]
-                image = encode_frame_to_bytes(image_rgb, 80)  # Lower quality for speed
+                image = encode_frame_to_bytes(image_rgb, 50)  # Lower quality for speed
                 anpr_status = "False"
             return image, height, width, anpr_status
         except Exception as e:
