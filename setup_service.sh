@@ -54,8 +54,8 @@ WorkingDirectory=$SCRIPT_DIR
 ExecStart=$DETECTION_SCRIPT
 Restart=always
 RestartSec=30
-StandardOutput=journal
-StandardError=journal
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=multi-user.target
