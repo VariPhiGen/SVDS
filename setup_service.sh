@@ -19,7 +19,7 @@ REBOOT_SERVICE_FILE="/etc/systemd/system/${REBOOT_SERVICE_NAME}.service"
 REBOOT_SCRIPT="$SCRIPT_DIR/reboot_system.sh"
 
 # 👉 Set your username manually here
-RUN_USER="svds9"
+RUN_USER="PUT User"
 
 echo "👉 Setting up services in $SCRIPT_DIR for user $RUN_USER"
 
@@ -54,6 +54,7 @@ WorkingDirectory=$SCRIPT_DIR
 ExecStart=$DETECTION_SCRIPT
 Restart=always
 RestartSec=30
+RuntimeMaxSec=21600
 StandardOutput=null
 StandardError=null
 
