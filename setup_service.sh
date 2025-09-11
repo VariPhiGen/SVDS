@@ -19,7 +19,11 @@ REBOOT_SERVICE_FILE="/etc/systemd/system/${REBOOT_SERVICE_NAME}.service"
 REBOOT_SCRIPT="$SCRIPT_DIR/reboot_system.sh"
 
 # 👉 Set your username manually here
-RUN_USER="PUT User"
+if [[ -n "$SUDO_USER" ]]; then
+    RUN_USER="$SUDO_USER"
+else
+    RUN_USER=$(whoami)
+fi
 
 echo "👉 Setting up services in $SCRIPT_DIR for user $RUN_USER"
 
