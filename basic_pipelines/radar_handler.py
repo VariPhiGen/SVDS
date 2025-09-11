@@ -261,7 +261,7 @@ class RadarHandler:
                         try:
                             
                             # Reset counter if speed difference is too large
-                            if previous_reading !=0 and abs(speed - previous_reading) > 4:
+                            if previous_reading !=0 and abs(speed - previous_reading) >= 4:
                                 self.count_radar = 0
                                 if self.flag==0:
                                     self._add_speed_to_rank(previous_reading, self.rankl_radar_speeds, current_time)
