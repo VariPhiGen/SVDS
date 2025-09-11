@@ -4,7 +4,7 @@ from collections import deque
 from threading import Thread, Lock
 from typing import Optional, Dict, Any, List, Tuple
 
-
+print("Yes")
 class RadarHandler:
     """Handles radar communication and speed data processing."""
     
