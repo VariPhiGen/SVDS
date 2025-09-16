@@ -75,7 +75,7 @@
           "speed_limit": {
             "car": 20,
             "truck": 20,
-            "motorcycle": 20
+            "motorcycle": 30
           },
           "calibration": 1.3668,
           "radar_calibration": 1,

@@ -108,6 +108,8 @@ sudo tee "$SYSTEMD_SERVICE" > /dev/null << EOF
 Description=Policy routing for eth0 (forced IPs)
 After=network-online.target
 Wants=network-online.target
+Restart=on-failure
+RestartSec=10
 
 [Service]
 Type=oneshot
