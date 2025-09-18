@@ -25,7 +25,6 @@ class RadarHandler:
         self.flag=0
         self.ser = None
         self.is_calibrating = {}
-        self.lr1t=time.time()
         
         # Connectivity monitoring
         self.last_successful_read = time.time()
@@ -207,105 +206,84 @@ class RadarHandler:
     def get_speed(self) -> Optional[Dict[str, Any]]:
         """
         Get current speed reading from radar.
-        
-        Returns:
-            Speed data dictionary or None
+        Fully fault-tolerant: auto-reconnects if disconnected.
         """
-        # Check connectivity and attempt reconnection if needed
+        # Ensure serial connection exists
         if not self._check_connectivity():
-            if not self._attempt_reconnection():
+            self.is_connected = False
+            self.ser = None
+            self._attempt_reconnection()
+            if not self.is_connected:
                 return None
 
         if not self.ser or not self.ser.is_open:
             return None
 
         try:
-            # Read 4 bytes at a time (protocol frame size)
-            #self.ser.reset_input_buffer()
-            data = self.ser.read(4)
+            data = self.ser.read(4)  # read 4 bytes
             if len(data) == 4:
-                # Update last successful read time
                 self.last_successful_read = time.time()
                 return self._process_speed_data(data)
-        except Exception as e:
+        except serial.SerialException as e:
             if hasattr(self, 'error_logger') and self.error_logger:
                 self.error_logger(f"Radar read error: {e}")
             self.is_connected = False
-            self.ser = None  # Force reconnection on next attempt
+            self.ser = None  # force reconnection
         return None
+
     
     def _radar_read_loop(self):
-        """Main radar reading loop running in a separate thread."""
+        """
+        Main radar reading loop running in a separate thread.
+        This version is fully continuous, fault-tolerant, and avoids busy-waiting.
+        """
         previous_reading = 0
         last_connectivity_check = time.time()
-        
-        try:
-            while self.radar_running:
-                try:
-                    # Periodic connectivity check every 10 seconds
-                    current_time = time.time()
-                    if current_time - last_connectivity_check > 300:
-                        if not self._check_connectivity():
-                            print("Radar connectivity check failed - attempting reconnection")
-                            if not self._attempt_reconnection():
-                                print("Radar reconnection failed - continuing without radar")
-                        last_connectivity_check = current_time
-                    
-                    speed_data = self.get_speed()
-                    if speed_data is not None:
-                        speed = speed_data['speed']
-                        direction = speed_data['direction']
-                        target_type = speed_data['type']   
-                        
-                        # Parse the radar data with thread safety
-                        try:
-                            
-                            # Reset counter if speed difference is too large
-                            if previous_reading !=0 and abs(speed - previous_reading) >= 4:
-                                self.count_radar = 0
-                                if self.flag==0:
-                                    self._add_speed_to_rank(previous_reading, self.rankl_radar_speeds, current_time)
-                                else:
-                                    self.flag=0
-                            previous_reading = speed
-                            self.latest_radar_speed.append((time.time(),speed))
-                            if speed != 0:
-                                self.count_radar += 1
-                                current_time = time.time()
-                                
-                                # Process based on count
-                                if self.count_radar == 1:
-                                    # First reading goes to rank1
-                                    # self._add_speed_to_rank(speed, self.rank1_radar_speeds, current_time)
-                                    self._cleanup_old_speeds(self.rankl_radar_speeds, current_time)
-                                    
-                                elif self.count_radar != 0:
-                                    # Even readings go to rank2
-                                    self._add_speed_to_rank(speed, self.rank3_radar_speeds, current_time)
-                                    # Process rank2 to rank3 transfer
-                                    self._process_rank3_to_rank2()
-                                    # print(f"Rank1 speeds: {list(self.rank1_radar_speeds)}")
-                                    # print(f"Rank2 speeds: {list(self.rank2_radar_speeds)}")
-                                    # print(f"Rank3 speeds: {list(self.rank3_radar_speeds)}")
-                                    # print(f"Rankl speeds: {list(self.rankl_radar_speeds)}")
-                                    # print(f"Latest Speed: {list(self.latest_radar_speed)}")
-                                
-                                # print(f"Actual Radar Running Speed: {speed}, Count: {self.count_radar}")
-                            else:
-                                self.count_radar = 0
-                        except (ValueError, IndexError) as e:
-                            if hasattr(self, 'error_logger') and self.error_logger:
-                                self.error_logger(f"Error parsing radar data: {e}")
-                            continue
-                            
-                except serial.SerialException as e:
-                    if hasattr(self, 'error_logger') and self.error_logger:
-                        self.error_logger(f"Serial communication error: {e}")
-                    break
-                        
-        except serial.SerialException as e:
-            if hasattr(self, 'error_logger') and self.error_logger:
-                self.error_logger(f"Failed to open radar serial port: {e}")
+
+        while self.radar_running:
+            current_time = time.time()
+
+            # Periodic connectivity check every 10 seconds
+            if current_time - last_connectivity_check > 10:
+                if not self._check_connectivity():
+                    print("Radar disconnected - attempting reconnection")
+                    success = self._attempt_reconnection()
+                    if not success:
+                        if hasattr(self, 'error_logger') and self.error_logger:
+                            self.error_logger("Radar reconnection failed, will retry continuously")
+                last_connectivity_check = current_time
+
+            # Try reading radar speed
+            speed_data = self.get_speed()
+            if speed_data is None:
+                time.sleep(0.05)  # small delay to prevent busy loop
+                continue
+
+            speed = speed_data['speed']
+            direction = speed_data['direction']
+            target_type = speed_data['type']
+
+            # Thread-safe processing
+            with self.radar_lock:
+                current_time = time.time()
+                if previous_reading != 0 and abs(speed - previous_reading) >= 4:
+                    self.count_radar = 0
+                    if self.flag == 0:
+                        self._add_speed_to_rank(previous_reading, self.rankl_radar_speeds, current_time)
+                    else:
+                        self.flag = 0
+                previous_reading = speed
+
+                self.latest_radar_speed.append((current_time, speed))
+                if speed != 0:
+                    self.count_radar += 1
+                    # Handle rank logic
+                    if self.count_radar == 1:
+                        self._cleanup_old_speeds(self.rankl_radar_speeds, current_time)
+                    elif self.count_radar != 0:
+                        self._add_speed_to_rank(speed, self.rank3_radar_speeds, current_time)
+                        self._process_rank3_to_rank2()
+                    # print(f"DEBUG: Latest speed: {self.latest_radar_speed}, Rankl: {self.rankl_radar_speeds}")
         
     def get_radar_data(self, ai_speed,threshold, obj_class):
         """
@@ -380,7 +358,7 @@ class RadarHandler:
                 else:
                     result=radar_speeds
                 #print("Result fron rankl Best Match",result)
-                valid_speeds = [(ts, speed) for ts, speed in result if ts > self.lr1t and speed > min_speed]
+                valid_speeds = [(ts, speed) for ts, speed in result]
             else:
                 valid_speeds = [(ts, speed) for ts, speed in radar_speeds if (speed-ai_speed) < self.max_diff_rais and speed > min_speed]
             # print(radar_speeds,rank_name)
@@ -401,7 +379,6 @@ class RadarHandler:
                 except ValueError:
                     # If best_match is not found in either deque, continue without error
                     pass
-                self.lr1t=best_match[0]
                 return best_match[1],rank1
         
         # No valid speeds found in any rank
@@ -442,4 +419,3 @@ class RadarHandler:
             # Keep only the most recent entry in rank3
             if len(self.rank2_radar_speeds) > 1:
                 self.rank2_radar_speeds.popleft()
-        

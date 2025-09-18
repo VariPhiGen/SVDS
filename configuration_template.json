@@ -73,8 +73,8 @@
         "parameters": {
           "real_distance": 10,
           "speed_limit": {
-            "car": 20,
-            "truck": 20,
+            "car": 30,
+            "truck": 30,
             "motorcycle": 30
           },
           "calibration": 1.3668,

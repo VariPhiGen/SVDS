@@ -170,9 +170,7 @@ class user_app_callback_class(app_callback_class):
                     filename, cgi_snapshot
                 )
         except Exception as e:
-            if hasattr(self, 'kafka_handler') and self.kafka_handler:
-                self.kafka_handler.send_error_log(f"Error in snapshot capture: {e}", sensor_id=self.sensor_id)
-            sys.exit(1)    
+            print(f"DEBUG: Error in snapshot capture: {e}")
         
         # Generate video bytes first (with timeout)
         video_bytes = None
@@ -187,12 +185,12 @@ class user_app_callback_class(app_callback_class):
         except asyncio.TimeoutError:
             pass  # Continue without video if timeout
         except Exception as e:
-            if hasattr(self, 'kafka_handler') and self.kafka_handler:
-                self.kafka_handler.send_error_log(f"Video generation error: {e}", sensor_id=self.sensor_id)
-            sys.exit(1)
+            print(f"DEBUG: Video generation error: {e}")
         
         # Lightweight image processing (immediate)
-        image, height, width, anpr_status = self._process_image_lightweight(anprimage)
+        # Lightweight image processing (immediate)
+        image, height, width, anpr_status = self._process_image_lightweight(anprimage, speed=final_speed)
+
         
         # Fire-and-forget RTSP save
         if hasattr(self, 'save_rtsp_images') and self.save_rtsp_images:
@@ -223,24 +221,36 @@ class user_app_callback_class(app_callback_class):
     
 
     
-    def _process_image_lightweight(self, anprimage):
+    def _process_image_lightweight(self, anprimage, speed=None):
         """Lightweight image processing without heavy operations."""
         try:
             if anprimage is not None:
+                # Overlay speed if provided
+                if speed is not None:
+                    cv2.putText(
+                        anprimage,
+                        f"Speed: {speed} km/h",
+                        (10, 30),  # top-left corner
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,          # font scale
+                        (0, 0, 255),  # red color
+                        2,          # thickness
+                        cv2.LINE_AA
+                    )
                 # Minimal processing - just get dimensions
                 anprimage_rgb = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
                 image = encode_frame_to_bytes(anprimage_rgb, 100)
                 height, width = anprimage.shape[:2]
                 anpr_status = "True"
             else:
-                image_rgb=cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
+                image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
                 height, width = self.image.shape[:2]
                 image = encode_frame_to_bytes(image_rgb, 80)  # Lower quality for speed
                 anpr_status = "False"
             return image, height, width, anpr_status
         except Exception as e:
-            import sys
-            sys.exit(1)
+            print(f"DEBUG: Error in image processing: {e}")
+
     
     async def _async_save_rtsp(self, anprimage, suffix):
         """Fire-and-forget RTSP image save."""
@@ -252,9 +262,7 @@ class user_app_callback_class(app_callback_class):
                 img_for_rtsp, self.cropping_dir, suffix
             )
         except Exception as e:
-            if hasattr(self, 'kafka_handler') and self.kafka_handler:
-                self.kafka_handler.send_error_log(f"RTSP save error: {e}", sensor_id=self.sensor_id)
-            sys.exit(1)
+            print(f"DEBUG: Error in RTSP save: {e}")
     
     def _queue_message_non_blocking(self, message):
         """Drop old messages to make space for new ones when queue is full."""
@@ -363,7 +371,8 @@ class user_app_callback_class(app_callback_class):
                                 radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
                             except Exception as e:
                                 print(f"CRITICAL: Radar data retrieval error: {e}")
-                                sys.exit(1)
+                                cleanup_resources()
+                                sys.exit(0)
                             
                             if radar_speed is not None and speed != 0 and rank1 and radar_speed !=0:
                                 self.calibrate_speed["speed"] = speed
@@ -386,7 +395,7 @@ class user_app_callback_class(app_callback_class):
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
                 self.create_result_overspeeding_events(xywh, obj_class, {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            elif 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]])+5 and result["radar_speed"] is None:
+            elif 55 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]])+5 and result["radar_speed"] is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])
@@ -549,7 +558,9 @@ if __name__ == "__main__":
         with open('configuration.json', 'r') as file:
             config = json.load(file)
     except Exception as e:
-        exit(1)
+        print(f"CRITICAL: Failed to load configuration: {e}")
+        cleanup_resources()
+        sys.exit(0)
     # Setup the Hef-path with path existence check
     try:
         hef_path = config.get("default_arguments", {}).get("hef_path")
@@ -578,13 +589,10 @@ if __name__ == "__main__":
         kafka_handler = KafkaHandler(config)
         user_data.kafka_handler = kafka_handler
         
-        # Set up error logger for radar handler
-        def error_logger(error_message):
-            kafka_handler.send_error_log(error_message, sensor_id=config.get("sensor_id"))
-        
-        user_data.radar_handler.set_error_logger(error_logger)
     except Exception as e:
-        exit(1)
+        print(f"CRITICAL: Failed to initialize Kafka handler: {e}")
+        cleanup_resources()
+        sys.exit(0)
 
     # Get save settings from config
     save_settings = config.get("save_settings", {})
@@ -606,8 +614,8 @@ if __name__ == "__main__":
             user_data.radar_handler.start_radar()
         except Exception as e:
             print(f"CRITICAL: Failed to initialize radar: {e}")
-            kafka_handler.send_error_log(f"Failed to initialize radar: {e}", sensor_id=config.get("sensor_id"))
-            sys.exit(1)
+            cleanup_resources()
+            sys.exit(0)
         
     # Snapshot if configured
     if "camera_details" in config:
@@ -620,7 +628,9 @@ if __name__ == "__main__":
                     pwd=cam_config.get("password")
                 )
         except Exception as e:
-            kafka_handler.send_error_log(f"Failed to initialize camera: {e}", sensor_id=config.get("sensor_id"))
+            print("DEBUG: Failed to initialize radar: {e}")
+            cleanup_resources()
+            sys.exit(0)
     
     # Add recorder to user_data for frame recording
     user_data.recorder = kafka_handler.recorder
