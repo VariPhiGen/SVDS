@@ -351,12 +351,13 @@ class RadarHandler:
         rank1=False
         for radar_speeds, rank_name in rank_configs:
             # Filter speeds above threshold - more efficient with list comprehension
+             # For latest Speed
             if rank_name == "rank1":
-                # For latest Speed
-                if int(self.latest_radar_speed[0][1])!=0:
-                    result=radar_speeds + self.latest_radar_speed
+                if len(self.latest_radar_speed) > 0 and int(self.latest_radar_speed[0][1]) != 0:
+                    result = radar_speeds + self.latest_radar_speed
                 else:
-                    result=radar_speeds
+                    result = radar_speeds   
+
                 #print("Result fron rankl Best Match",result)
                 valid_speeds = [(ts, speed) for ts, speed in result]
             else:
