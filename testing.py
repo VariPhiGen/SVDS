@@ -94,13 +94,16 @@ class user_app_callback_class(app_callback_class):
         self.ccai=time.time()
 
         # Traffic Overspeeding Distancewise Variables
+        self.speed_buckets = [(20, 30), (30, 40), (50, 60), (60, 70),(70,80),(80,90),(90,100)]
         self.traffic_overspeeding_distancewise_data = None
+        self.traffic_overspeeding_distancewise_data_inst=None
         self.distancewise_tracking = None
         self.calibrate_class_wise = {}
-        self.calibrate_speed = {}
-        self.calibrated_classes = set()  # Track which classes are done calibrating
         self.calibrate_history = {}
         self.calibration_required={}
+        self.speed_correction=defaultdict(dict)
+        self.calibrate_speed = {}
+        self.calibrated_classes = set()  # Track which classes are done calibrating
 
         # Queue for sending Data to Kafka
         self.results_analytics_queue = None
@@ -121,7 +124,19 @@ class user_app_callback_class(app_callback_class):
         self.main_loop = asyncio.new_event_loop()
         self.asyncio_thread = Thread(target=self.start_asyncio_loop, daemon=True)
         self.asyncio_thread.start()
+
+    def get_speed_bucket(self,speed):
+        for b in self.speed_buckets:
+            if b[0] <= speed < b[1]:
+                return b
+        return None  # fallback to highest bucket
+
+    def calculate_correction(self, radar_speed,ai,bucket,cls):
+        if radar_speed is not None and ai!=0:
+            self.speed_correction[cls][bucket]=float(int(radar_speed)/int(ai))
+        #print(self.speed_correction)
         
+
     def calibration_check(self,flag=False):
         """
         Compute a per-class calibration factor (radar_speed / ai_speed),
@@ -138,34 +153,35 @@ class user_app_callback_class(app_callback_class):
             rs = float(radar_speed)
         except (TypeError, ValueError):
             return False  # invalid or missing data—nothing to do
+        
+       
 
         # Compute and store calibration factor
-        cv = rs*self.calibrate_class_wise[cls]/ ai
-        #print("CV Calculation", cv)
-        self.calibrate_history[cls].append(cv)
+        if (flag is True) or flag is False:
+            cv = rs*self.calibrate_class_wise[cls]/ ai
 
-            # --- Dynamic validity: reject strong outliers based on median & MAD ---
-        if len(self.calibrate_history[cls]) > 3:
-            median = statistics.median(self.calibrate_history[cls])
-            mad = statistics.median([abs(x - median) for x in self.calibrate_history[cls]]) or 1e-6
-            if abs(cv - median) > 2.5 * mad:
-                # reject as anomaly
-                cs["speed"] = cs["radar"] = cs["class_name"] = None
-                return False
-
+            print("CV Calculation", cv)
+            self.calibrate_history[cls].append(cv)
+             # --- Dynamic validity: reject strong outliers based on median & MAD ---
+            if len(self.calibrate_history[cls]) > 3:
+                median = statistics.median(self.calibrate_history[cls])
+                mad = statistics.median([abs(x - median) for x in self.calibrate_history[cls]]) or 1e-6
+                if abs(cv - median) > 2.5 * mad:
+                    # reject as anomaly
+                    cs["speed"] = cs["radar"] = cs["class_name"] = None
+                    return False
                 
-
-        if len(self.calibrate_history[cls])>=3:
-            # --- EWMA update ---
-            alpha = 0.25  # smoothing factor (adjust between 0.1 and 0.5)
-            prev_calib = self.calibrate_class_wise[cls]
-            ewma_ratio = (1 - alpha) * prev_calib + alpha * cv
-            self.calibrate_class_wise[cls] = ewma_ratio
-        elif len(self.calibrate_history[cls])>1:
-            self.calibrate_class_wise[cls]=statistics.median(self.calibrate_history[cls])
-        else:
-            self.calibrate_class_wise[cls] = cv
-
+            if len(self.calibrate_history[cls])>3:
+                # --- EWMA update ---
+                alpha = 0.25  # smoothing factor (adjust between 0.1 and 0.5)
+                prev_calib = self.calibrate_class_wise[cls]
+                ewma_ratio = (1 - alpha) * prev_calib + alpha * cv
+                self.calibrate_class_wise[cls] = ewma_ratio
+            elif len(self.calibrate_history[cls])>1:
+                self.calibrate_class_wise[cls]=statistics.median(self.calibrate_history[cls])
+            else:
+                self.calibrate_class_wise[cls] = cv
+            
         # Reset input values efficiently
         # Use assignment to None
         cs["speed"] = cs["radar"] = cs["class_name"] = None
@@ -356,6 +372,8 @@ class user_app_callback_class(app_callback_class):
                     if tracker_id not in self.last_n_frame_tracker_ids:
                         # Remove the tracker_id from self.traffic_overspeeding_distancewise_data
                         del self.traffic_overspeeding_distancewise_data[tracker_id]
+                        del self.traffic_overspeeding_distancewise_data_inst[tracker_id]
+
     
     # Activities Logics
     def traffic_overspeeding_distancewise(self):
@@ -383,6 +401,19 @@ class user_app_callback_class(app_callback_class):
                         self.distancewise_tracking.append(tracker_id)
                         self.traffic_overspeeding_distancewise_data[tracker_id]["entry_anchor"] = anchor
                         self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"] = self.time_stamp[-1]
+                        self.traffic_overspeeding_distancewise_data_inst[tracker_id]["entry_anchor"] = anchor
+                        self.traffic_overspeeding_distancewise_data_inst[tracker_id]["entry_time"] = self.time_stamp[-1]
+
+                    elif tracker_id in self.distancewise_tracking and tracker_id not in self.violation_id_data["traffic_overspeeding_distancewise"]:
+                        vehicle_path = [anchor, self.traffic_overspeeding_distancewise_data_inst[tracker_id]["entry_anchor"]]
+                        if vehicle_path[0][1] > vehicle_path[1][1]:
+                            projected_distance, total_distance, lane_name = closest_line_projected_distance(vehicle_path, self.parameters_data["traffic_overspeeding_distancewise"]["lines"])
+                            distance = float(projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
+                            speed = float(int(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data_inst[tracker_id]["entry_time"])))
+                            print("Tracker Id and Speed", tracker_id,speed)
+                            self.traffic_overspeeding_distancewise_data_inst[tracker_id]["entry_anchor"] = anchor
+                            self.traffic_overspeeding_distancewise_data_inst[tracker_id]["entry_time"] = self.time_stamp[-1]
+                            
                         
                 elif tracker_id in self.distancewise_tracking and tracker_id not in self.violation_id_data["traffic_overspeeding_distancewise"]:
                     vehicle_path = [anchor, self.traffic_overspeeding_distancewise_data[tracker_id]["entry_anchor"]]
@@ -390,17 +421,13 @@ class user_app_callback_class(app_callback_class):
                     if vehicle_path[0][1] > vehicle_path[1][1]:
                         projected_distance, total_distance, lane_name = closest_line_projected_distance(vehicle_path, self.parameters_data["traffic_overspeeding_distancewise"]["lines"])
                         if projected_distance > (0.3*self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]):
-                            distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
-                            time_spent=self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"]
-                            speed = float(int(distance * 3.6 / (time_spent)*float(self.calibrate_class_wise[obj_class])))
-                            #print( speed,(self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"]),self.calibrate_class_wise[obj_class],distance,total_distance,projected_distance,self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
+                            distance = float(projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
+                            
+                            speed = float(int(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])*float(self.calibrate_class_wise[obj_class])))
+                            print( speed,(self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"]),self.calibrate_class_wise[obj_class],distance,total_distance,projected_distance,self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             try:
-                                radar_speed,rank1,radar_normal_status = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
-                                #print("Original AI Speed and Radar Speed", speed, radar_speed)
-                                if not radar_normal_status:
-                                    break
+                                radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
                                 if radar_speed is None and obj_class in self.calibrated_classes:
-
                                     self.calibration_required[obj_class]+=1
                                     if self.calibration_required[obj_class]>5:
                                         self.radar_handler.is_calibrating[obj_class]=True
@@ -408,26 +435,27 @@ class user_app_callback_class(app_callback_class):
                                         self.calibrated_classes.discard(obj_class)
                                 else:
                                     self.calibration_required[obj_class]=0
-
+                                print("Original Radar and Speed with Class",speed, radar_speed,obj_class)
                             except Exception as e:
                                 print(f"CRITICAL: Radar data retrieval error: {e}")
-                                cleanup_resources()
-                                sys.exit(0)
+                                #cleanup_resources()
+                                #sys.exit(0)
                             
                             if radar_speed is not None and speed != 0 and rank1 and radar_speed !=0:
                                 self.calibrate_speed["speed"] = speed
                                 self.calibrate_speed["class_name"] = obj_class
                                 self.calibrate_speed["radar"] = radar_speed
-                                if obj_class not in self.calibrated_classes:
+                                if obj_class not in self.calibrated_classes and self.radar_handler.is_calibrating[obj_class] is True:
                                     self.calibration_check()
-                                    if not self.radar_handler.is_calibrating[obj_class]:
-                                        self.calibrated_classes.add(obj_class)
+                                elif obj_class not in self.calibrated_classes and self.radar_handler.is_calibrating[obj_class] is False:
+                                    self.calibration_check()
+                                    self.calibrated_classes.add(obj_class)
                                 else:
-                                    self.calibration_check()
+                                    self.calibration_check(True)
+
 
                             if obj_class in self.calibrated_classes and ai_flag==1 :
-                                if radar_speed is None and time_spent > 0.11  or abs(speed-radar_speed)<20:
-                                    #print("Overspeeding Detected", speed,radar_speed)
+                                if radar_speed is None or abs(speed-radar_speed)<20:
                                     overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
         
         for result in overspeeding_result:
@@ -486,7 +514,10 @@ def app_callback(pad, info, user_data,frame_type):
         if format is not None and width is not None and height is not None:
             buf_timestamp = buffer.pts  # nanoseconds
             ts = buf_timestamp / Gst.SECOND
-            #print(ts)
+            #try:
+            #    print(ts-user_data.time_stamp[-1])
+            #except:
+            #    pass
             user_data.time_stamp.append(ts)
             # Get video frame
             frame = get_numpy_from_buffer(buffer, format, width, height)
@@ -580,6 +611,7 @@ if __name__ == "__main__":
     env_file     = project_root / ".env"
     env_path_str = str(env_file)
     os.environ["HAILO_ENV_FILE"] = env_path_str
+    print(env_path_str)
     # Logging is disabled - all errors sent to Kafka
     setup_logging()
 
@@ -708,6 +740,7 @@ if __name__ == "__main__":
                 parameters_data[activity]=details["parameters"]
                 violation_id_data[activity]=[]
                 user_data.traffic_overspeeding_distancewise_data=defaultdict(lambda: defaultdict(dict))
+                user_data.traffic_overspeeding_distancewise_data_inst=defaultdict(lambda: defaultdict(dict))
                 user_data.distancewise_tracking=[]
                 parameters_data["traffic_overspeeding_distancewise"]["lines_length"]={}
                 user_data.time_stamp=deque(maxlen=20)
@@ -720,8 +753,10 @@ if __name__ == "__main__":
                 for class_name, limit in details["parameters"]["speed_limit"].items():
                     # Calibrate using your logic; here's an example:
                     user_data.calibrate_class_wise[class_name] = details["parameters"]["calibration"]
-                    user_data.calibrate_history[class_name]=deque(maxlen=7)
-
+                    user_data.calibrate_history[class_name]=deque(maxlen=5)
+                    for bucket in user_data.speed_buckets:
+                        user_data.speed_correction[class_name][bucket]=None
+                
                 user_data.calibrate_speed["speed"] = None
                 user_data.calibrate_speed["class_name"] = None
                 user_data.calibrate_speed["radar"] = None
