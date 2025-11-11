@@ -23,8 +23,6 @@ class RadarHandler:
         self.rankl_radar_speeds = deque()
         self.latest_radar_speed = deque(maxlen=1)
         self.flag=0
-        self.abnormal_count=0
-        self.normal_status=True
         self.ser = None
         self.is_calibrating = {}
         self.calibration_required={}
@@ -178,7 +176,7 @@ class RadarHandler:
                 # Check for target speed pattern: 0xFC 0xFA sum 0x00
                 if data[i] == 0xFC and data[i+1] == 0xFA and data[i+3] == 0x00:
                     speed_raw = data[i+2]
-                    if 0x0F <= speed_raw <= 0xFA:  # Valid speed range
+                    if 0x0F <= speed_raw <= 0x64:  # Valid speed range
                         speed_kmh = speed_raw
                         direction = 'Approaching'
                         return {
@@ -286,12 +284,7 @@ class RadarHandler:
                     elif self.count_radar != 0:
                         self._add_speed_to_rank(speed, self.rank3_radar_speeds, current_time)
                         self._process_rank3_to_rank2()
-                    # print(f"DEBUG: Latest speed: {self.latest_radar_speed}, Rankl: {self.rankl_radar_speeds}")
-                    #Absnormal Check
-                    if speed > 65:
-                        self.abnormal_count+=1
-                    else:
-                        self.abnormal_count=0
+                    #print(f"DEBUG: Latest speed: {self.latest_radar_speed}, Rankl: {self.rankl_radar_speeds}")
         
     def get_radar_data(self, ai_speed,threshold, obj_class):
         """
@@ -300,22 +293,18 @@ class RadarHandler:
         with self.radar_lock:
             # Early exit if no radar data available
             if not any([self.rankl_radar_speeds, self.rank2_radar_speeds, self.rank3_radar_speeds]):
-                return None,False,self.normal_status
-            elif self.abnormal_count>15:
-                self.normal_status=False
-                return None,False,self.normal_status
-            elif self.abnormal_count==0:
-                self.normal_status=True
+                return None,False
+            
             # Filter speeds above threshold once
             min_speed = threshold - 2
             
             # Process calibration mode
             if self.is_calibrating[obj_class]:
                 rs,r1=self._handle_calibration_mode(ai_speed, obj_class, min_speed)
-                return rs,r1,self.normal_status
+                return rs,r1
             # Normal mode: try each rank in order
             rs,r1=self._get_best_match_from_ranks(ai_speed, min_speed)
-            return rs,r1,self.normal_status
+            return rs,r1
 
     def _handle_calibration_mode(self, ai_speed, obj_class, min_speed):
         """
@@ -323,7 +312,7 @@ class RadarHandler:
         """
         # Filter rank1 speeds once - more efficient with list comprehension
         result=self.rankl_radar_speeds+self.latest_radar_speed
-        valid_speeds = [(ts, speed) for ts, speed in result if speed > min_speed] # This will filter speed of 0km/h
+        valid_speeds = [(ts, speed) for ts, speed in result if speed > 15]
         if not valid_speeds or len(valid_speeds)>1:
             return None,False
         
@@ -363,7 +352,7 @@ class RadarHandler:
         rank1=False
         for radar_speeds, rank_name in rank_configs:
             # Filter speeds above threshold - more efficient with list comprehension
-             # For latest Speed
+            # For latest Speed
             if rank_name == "rank1":
                 if len(self.latest_radar_speed) > 0 and int(self.latest_radar_speed[0][1]) != 0:
                     result = radar_speeds + self.latest_radar_speed
@@ -373,7 +362,7 @@ class RadarHandler:
                 #print("Result fron rankl Best Match",result)
                 valid_speeds = [(ts, speed) for ts, speed in result if speed > 15]
             else:
-                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if abs(speed-ai_speed) < self.max_diff_rais and speed > min_speed]
+                valid_speeds = [(ts, speed) for ts, speed in radar_speeds if abs(speed-ai_speed) < self.max_diff_rais and speed > 15]
             # print(radar_speeds,rank_name)
             if valid_speeds:
                 # Get earliest timestamp (best match)

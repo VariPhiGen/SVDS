@@ -290,7 +290,7 @@ class RadarHandler:
                                     # print(f"Rankl speeds: {list(self.rankl_radar_speeds)}")
                                     # print(f"Latest Speed: {list(self.latest_radar_speed)}")
                                 
-                                # print(f"Actual Radar Running Speed: {speed}, Count: {self.count_radar}")
+                                print(f"Actual Radar Running Speed: {speed}, Count: {self.count_radar}")
                             else:
                                 self.count_radar = 0
                         except (ValueError, IndexError) as e:
