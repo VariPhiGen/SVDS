@@ -426,7 +426,8 @@ class user_app_callback_class(app_callback_class):
                                     self.calibration_check()
 
                             if obj_class in self.calibrated_classes and ai_flag==1 :
-                                if radar_speed is None and time_spent > 0.11  or abs(speed-radar_speed)<self.radar_maxdiff:
+                                if ((radar_speed is None and time_spent > 0.11) or (radar_speed is not None and abs(speed - radar_speed) < self.radar_maxdiff)):
+
                                     #print("Overspeeding Detected", speed,radar_speed)
                                     overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
         
