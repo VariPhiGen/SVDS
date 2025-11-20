@@ -16,6 +16,7 @@ class RadarHandler:
         self.radar_running = False
         self.radar_lock = Lock()  # Lock for thread-safe radar data access
         self.count_radar = 0  # Count radar until it will become 0 again
+        self.LTRC=None
         # Use deques for better performance with time-series data
         # self.rank1_radar_speeds = deque()
         self.rank2_radar_speeds = deque()
@@ -178,8 +179,16 @@ class RadarHandler:
                 # Check for target speed pattern: 0xFC 0xFA sum 0x00
                 if data[i] == 0xFC and data[i+1] == 0xFA and data[i+3] == 0x00:
                     speed_raw = data[i+2]
-                    if 0x0F <= speed_raw <= 0xFA:  # Valid speed range
+                    if 0x14 <= speed_raw <= 0xFA:  # Valid speed range
                         speed_kmh = speed_raw
+                        direction = 'Approaching'
+                        return {
+                            'speed': speed_kmh,
+                            'direction': direction,
+                            'type': 'Primary Target'
+                        }
+                    else:
+                        speed_kmh = 0
                         direction = 'Approaching'
                         return {
                             'speed': speed_kmh,
@@ -200,7 +209,11 @@ class RadarHandler:
                             'type': 'Leading Target'
                         }
             
-            return None
+            return {
+                            'speed': 0,
+                            'direction': 'Approaching',
+                            'type': 'Leading Target'
+                        }
         except Exception as e:
             if hasattr(self, 'error_logger') and self.error_logger:
                 self.error_logger(f"Error processing speed data: {e}")
@@ -258,6 +271,7 @@ class RadarHandler:
 
             # Try reading radar speed
             speed_data = self.get_speed()
+            #print(speed_data)
             if speed_data is None:
                 time.sleep(0.05)  # small delay to prevent busy loop
                 continue
@@ -277,7 +291,10 @@ class RadarHandler:
                         self.flag = 0
                 previous_reading = speed
 
-                self.latest_radar_speed.append((current_time, speed))
+                if self.flag==0:
+                    self.latest_radar_speed.append((current_time, speed))
+                
+                
                 if speed != 0:
                     self.count_radar += 1
                     # Handle rank logic
@@ -286,7 +303,7 @@ class RadarHandler:
                     elif self.count_radar != 0:
                         self._add_speed_to_rank(speed, self.rank3_radar_speeds, current_time)
                         self._process_rank3_to_rank2()
-                    # print(f"DEBUG: Latest speed: {self.latest_radar_speed}, Rankl: {self.rankl_radar_speeds}")
+                    #print(f"DEBUG: Latest speed: {self.latest_radar_speed}, Rankl: {self.rankl_radar_speeds}")
                     #Absnormal Check
                     if speed > 65:
                         self.abnormal_count+=1
@@ -343,11 +360,13 @@ class RadarHandler:
             if best_match in self.rankl_radar_speeds:
                 self.rankl_radar_speeds.remove(best_match)
             elif best_match in self.latest_radar_speed:
-                #self.latest_radar_speed.remove(best_match)
+                self.latest_radar_speed.remove(best_match)
+                #print("calibration done with latest Speed")
                 self.flag=1
         except ValueError:
             # If best_match is not found in either deque, continue without error
             pass
+        self.LTRC=best_match[0]
         return best_match[1],True
 
     def _get_best_match_from_ranks(self, ai_speed, min_speed):
@@ -365,10 +384,11 @@ class RadarHandler:
             # Filter speeds above threshold - more efficient with list comprehension
              # For latest Speed
             if rank_name == "rank1":
-                if len(self.latest_radar_speed) > 0 and int(self.latest_radar_speed[0][1]) != 0:
+                if self.latest_radar_speed and int(self.latest_radar_speed[0][1]) != 0:
                     result = radar_speeds + self.latest_radar_speed
                 else:
-                    result = radar_speeds   
+                    result = radar_speeds
+ 
 
                 #print("Result fron rankl Best Match",result)
                 valid_speeds = [(ts, speed) for ts, speed in result if speed > 15]
@@ -379,19 +399,22 @@ class RadarHandler:
                 # Get earliest timestamp (best match)
                 best_match = min(valid_speeds, key=lambda x: abs(x[1] - ai_speed))
                 
-                if len(valid_speeds)==1 and rank_name == "rank1":
+                if len(valid_speeds)==1 and rank_name == "rank1" and valid_speeds[0][0]>self.LTRC:
                   rank1=True
                   
 				# Remove used speed
                 try:
                     if best_match in radar_speeds:
+                        #print("speed is from Rankl")
                         radar_speeds.remove(best_match)
-                    elif best_match in radar_speeds:
-                        radar_speeds.remove(best_match)
+                    elif best_match in self.latest_radar_speed:
+                        #print("speed is from Latest")
+                        self.latest_radar_speed.remove(best_match)
                         self.flag=1
                 except ValueError:
                     # If best_match is not found in either deque, continue without error
                     pass
+                self.LTRC=best_match[0]
                 return best_match[1],rank1
         
         # No valid speeds found in any rank

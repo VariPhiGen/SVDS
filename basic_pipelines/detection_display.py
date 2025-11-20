@@ -23,6 +23,7 @@ import argparse
 import atexit
 import signal
 from snapshotapi import Snapshot
+import statistics
 
 # Local modules
 from kafka_handler import KafkaHandler
@@ -98,6 +99,8 @@ class user_app_callback_class(app_callback_class):
         self.calibrate_class_wise = {}
         self.calibrate_speed = {}
         self.calibrated_classes = set()  # Track which classes are done calibrating
+        self.calibrate_history = {}
+        self.calibration_required={}
 
         # Queue for sending Data to Kafka
         self.results_analytics_queue = None
@@ -134,13 +137,35 @@ class user_app_callback_class(app_callback_class):
             ai = float(ai_speed)
             rs = float(radar_speed)
         except (TypeError, ValueError):
-            return  # invalid or missing data—nothing to do
+            return False  # invalid or missing data—nothing to do
 
         # Compute and store calibration factor
-        if (flag is True and abs(ai-rs)<self.radar_maxdiff) or flag is False:
-            self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
-        elif (time.time()-self.ccai) > 300:
-            self.calibrate_class_wise[cls] = rs*self.calibrate_class_wise[cls]/ ai
+        cv = rs*self.calibrate_class_wise[cls]/ ai
+        #print("CV Calculation", cv)
+        self.calibrate_history[cls].append(cv)
+
+            # --- Dynamic validity: reject strong outliers based on median & MAD ---
+        if len(self.calibrate_history[cls]) > 3:
+            median = statistics.median(self.calibrate_history[cls])
+            mad = statistics.median([abs(x - median) for x in self.calibrate_history[cls]]) or 1e-6
+            if abs(cv - median) > 2.5 * mad:
+                # reject as anomaly
+                cs["speed"] = cs["radar"] = cs["class_name"] = None
+                return False
+
+                
+
+        if len(self.calibrate_history[cls])>=3:
+            # --- EWMA update ---
+            alpha = 0.25  # smoothing factor (adjust between 0.1 and 0.5)
+            prev_calib = self.calibrate_class_wise[cls]
+            ewma_ratio = (1 - alpha) * prev_calib + alpha * cv
+            self.calibrate_class_wise[cls] = ewma_ratio
+        elif len(self.calibrate_history[cls])>1:
+            self.calibrate_class_wise[cls]=statistics.median(self.calibrate_history[cls])
+        else:
+            self.calibrate_class_wise[cls] = cv
+
         # Reset input values efficiently
         # Use assignment to None
         cs["speed"] = cs["radar"] = cs["class_name"] = None
@@ -151,7 +176,7 @@ class user_app_callback_class(app_callback_class):
         asyncio.set_event_loop(self.main_loop)
         self.main_loop.run_forever()
         
-    async def trigger_snapshot_loop(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None,rtsp_image=None):
+    async def trigger_snapshot_loop(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None):
         # Use existing main_loop instead of creating new one
         try:
             final_speed = parameters["speed"]
@@ -170,9 +195,7 @@ class user_app_callback_class(app_callback_class):
                     filename, cgi_snapshot
                 )
         except Exception as e:
-            if hasattr(self, 'kafka_handler') and self.kafka_handler:
-                self.kafka_handler.send_error_log(f"Error in snapshot capture: {e}", sensor_id=self.sensor_id)
-            sys.exit(1)    
+            print(f"DEBUG: Error in snapshot capture: {e}")
         
         # Generate video bytes first (with timeout)
         video_bytes = None
@@ -187,15 +210,16 @@ class user_app_callback_class(app_callback_class):
         except asyncio.TimeoutError:
             pass  # Continue without video if timeout
         except Exception as e:
-            if hasattr(self, 'kafka_handler') and self.kafka_handler:
-                self.kafka_handler.send_error_log(f"Video generation error: {e}", sensor_id=self.sensor_id)
-            sys.exit(1)
+            print(f"DEBUG: Video generation error: {e}")
         
         # Lightweight image processing (immediate)
-        image, height, width, anpr_status = self._process_image_lightweight(anprimage)
+        # Lightweight image processing (immediate)
+        image, height, width, anpr_status = self._process_image_lightweight(anprimage, speed=final_speed)
+
         
         # Fire-and-forget RTSP save
-        asyncio.create_task(self._async_save_rtsp(rtsp_image, suffix))
+        if hasattr(self, 'save_rtsp_images') and self.save_rtsp_images:
+            asyncio.create_task(self._async_save_rtsp(anprimage, suffix))
         
         # Create message with complete data
         message = {
@@ -222,38 +246,48 @@ class user_app_callback_class(app_callback_class):
     
 
     
-    def _process_image_lightweight(self, anprimage):
+    def _process_image_lightweight(self, anprimage, speed=None):
         """Lightweight image processing without heavy operations."""
         try:
             if anprimage is not None:
+                # Overlay speed if provided
+                if speed is not None:
+                    cv2.putText(
+                        anprimage,
+                        f"Speed: {speed} km/h",
+                        (10, 30),  # top-left corner
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,          # font scale
+                        (0, 0, 255),  # red color
+                        2,          # thickness
+                        cv2.LINE_AA
+                    )
                 # Minimal processing - just get dimensions
                 anprimage_rgb = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
                 image = encode_frame_to_bytes(anprimage_rgb, 100)
                 height, width = anprimage.shape[:2]
                 anpr_status = "True"
             else:
-                image_rgb=cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB)
+                image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
                 height, width = self.image.shape[:2]
-                image = encode_frame_to_bytes(image_rgb, 50)  # Lower quality for speed
+                image = encode_frame_to_bytes(image_rgb, 80)  # Lower quality for speed
                 anpr_status = "False"
             return image, height, width, anpr_status
         except Exception as e:
-            import sys
-            sys.exit(1)
+            print(f"DEBUG: Error in image processing: {e}")
+
     
-    async def _async_save_rtsp(self, rtspimage, suffix):
+    async def _async_save_rtsp(self, anprimage, suffix):
         """Fire-and-forget RTSP image save."""
         try:
-            img_for_rtsp = cv2.cvtColor(rtspimage, cv2.COLOR_BGR2RGB) if rtspimage is not None else self.image
+            img_for_rtsp = cv2.cvtColor(anprimage, cv2.COLOR_BGR2RGB) if anprimage is not None else self.image
             await self.main_loop.run_in_executor(
                 self.thread_pool,
                 self.recorder.save_images,
                 img_for_rtsp, self.cropping_dir, suffix
             )
         except Exception as e:
-            if hasattr(self, 'kafka_handler') and self.kafka_handler:
-                self.kafka_handler.send_error_log(f"RTSP save error: {e}", sensor_id=self.sensor_id)
-            sys.exit(1)
+            print(f"DEBUG: Error in RTSP save: {e}")
     
     def _queue_message_non_blocking(self, message):
         """Drop old messages to make space for new ones when queue is full."""
@@ -311,8 +345,7 @@ class user_app_callback_class(app_callback_class):
             pass
 
     def create_result_overspeeding_events(self, xywh, class_name, parameters, datetimestamp, confidence=1, anprimage=None):
-        
-        asyncio.run_coroutine_threadsafe(self.trigger_snapshot_loop(xywh, class_name, parameters, datetimestamp, confidence, anprimage,self.image), self.main_loop)
+        asyncio.run_coroutine_threadsafe(self.trigger_snapshot_loop(xywh, class_name, parameters, datetimestamp, confidence, anprimage), self.main_loop)
 
     def cleaning_events_data_with_last_frames(self):
         # Cleaning Violations
@@ -336,6 +369,7 @@ class user_app_callback_class(app_callback_class):
             return 
         
         for idx in vehicle_index:
+            ai_flag=1
             box = self.detection_boxes[idx]
             obj_class = self.classes[idx]
             tracker_id = self.tracker_ids[idx]
@@ -357,25 +391,56 @@ class user_app_callback_class(app_callback_class):
                         projected_distance, total_distance, lane_name = closest_line_projected_distance(vehicle_path, self.parameters_data["traffic_overspeeding_distancewise"]["lines"])
                         if projected_distance > (0.3*self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name]):
                             distance = float(self.parameters_data["traffic_overspeeding_distancewise"]["real_distance"] * projected_distance / self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
-                            
-                            speed = float(int(distance * 3.6 / (self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"])*float(self.calibrate_class_wise[obj_class])))
+                            time_spent=self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"]
+                            speed = float(int(distance * 3.6 / (time_spent)*float(self.calibrate_class_wise[obj_class])))
+                            print( speed,(self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"]),self.calibrate_class_wise[obj_class],distance,total_distance,projected_distance,self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             try:
-                                radar_speed,rank1 = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
+                                radar_speed,rank1,radar_normal_status = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
+                                if radar_speed is not None:
+                                    radar_speed=int(radar_speed*self.parameters_data["traffic_overspeeding_distancewise"]["radar_calibration"])
+                                print("Original AI Speed and Radar Speed", rank1, speed, radar_speed)
+                                if not radar_normal_status:
+                                    break
+                                if radar_speed is None and obj_class in self.calibrated_classes:
+
+                                    self.calibration_required[obj_class]+=1
+                                    if self.calibration_required[obj_class]>5:
+                                        self.radar_handler.is_calibrating[obj_class]=True
+                                        self.radar_handler.class_calibration_count[obj_class]=0
+                                        self.calibrated_classes.discard(obj_class)
+                                else:
+                                    self.calibration_required[obj_class]=0
+
                             except Exception as e:
                                 print(f"CRITICAL: Radar data retrieval error: {e}")
-                                sys.exit(1)
+                                cleanup_resources()
+                                sys.exit(0)
                             
                             if radar_speed is not None and speed != 0 and rank1 and radar_speed !=0:
                                 self.calibrate_speed["speed"] = speed
                                 self.calibrate_speed["class_name"] = obj_class
                                 self.calibrate_speed["radar"] = radar_speed
-                                if obj_class not in self.calibrated_classes and self.calibration_check() and self.radar_handler.is_calibrating[obj_class] is False:
-                                    self.calibrated_classes.add(obj_class)
+                                if obj_class not in self.calibrated_classes:
+                                    self.calibration_check()
+                                    if not self.radar_handler.is_calibrating[obj_class]:
+                                        self.calibrated_classes.add(obj_class)
+                                        ai_flag=0
                                 else:
-                                    self.calibration_check(True)
-                            if obj_class in self.calibrated_classes:
-                                overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
-        
+                                    self.calibration_check()
+
+                            if obj_class in self.calibrated_classes and ai_flag==1 :
+                                if ((radar_speed is None and time_spent > 0.11) or (radar_speed is not None and abs(speed - radar_speed) <= self.radar_maxdiff)):
+                                    print("Overspeeding Detected", speed,radar_speed)
+                                    overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+                                elif rank1 and time_spent > 0.11 and radar_speed is not None and speed > radar_speed:
+                                    print("Overspeeding Detected via Rank 1 and Radar",rank1,speed,radar_speed)
+                                    overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+                                elif (radar_speed is not None and time_spent > 0.11) :
+                                    radar_speed=None
+                                    print("Overspeeding Detected via AI", speed,radar_speed)
+                                    overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+                                
+                        
         for result in overspeeding_result:
             obj_class = result["obj_class"]
             if result["radar_speed"] is not None and 120 >= result["radar_speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]):
@@ -386,7 +451,7 @@ class user_app_callback_class(app_callback_class):
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
                 self.create_result_overspeeding_events(xywh, obj_class, {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            elif 75 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]])+5 and result["radar_speed"] is None:
+            elif 85 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]])+5 and result["radar_speed"] is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])
@@ -549,7 +614,9 @@ if __name__ == "__main__":
         with open('configuration.json', 'r') as file:
             config = json.load(file)
     except Exception as e:
-        exit(1)
+        print(f"CRITICAL: Failed to load configuration: {e}")
+        cleanup_resources()
+        sys.exit(0)
     # Setup the Hef-path with path existence check
     try:
         hef_path = config.get("default_arguments", {}).get("hef_path")
@@ -578,13 +645,10 @@ if __name__ == "__main__":
         kafka_handler = KafkaHandler(config)
         user_data.kafka_handler = kafka_handler
         
-        # Set up error logger for radar handler
-        def error_logger(error_message):
-            kafka_handler.send_error_log(error_message, sensor_id=config.get("sensor_id"))
-        
-        user_data.radar_handler.set_error_logger(error_logger)
     except Exception as e:
-        exit(1)
+        print(f"CRITICAL: Failed to initialize Kafka handler: {e}")
+        cleanup_resources()
+        sys.exit(0)
 
     # Get save settings from config
     save_settings = config.get("save_settings", {})
@@ -606,8 +670,8 @@ if __name__ == "__main__":
             user_data.radar_handler.start_radar()
         except Exception as e:
             print(f"CRITICAL: Failed to initialize radar: {e}")
-            kafka_handler.send_error_log(f"Failed to initialize radar: {e}", sensor_id=config.get("sensor_id"))
-            sys.exit(1)
+            cleanup_resources()
+            sys.exit(0)
         
     # Snapshot if configured
     if "camera_details" in config:
@@ -620,7 +684,9 @@ if __name__ == "__main__":
                     pwd=cam_config.get("password")
                 )
         except Exception as e:
-            kafka_handler.send_error_log(f"Failed to initialize camera: {e}", sensor_id=config.get("sensor_id"))
+            print("DEBUG: Failed to initialize radar: {e}")
+            cleanup_resources()
+            sys.exit(0)
     
     # Add recorder to user_data for frame recording
     user_data.recorder = kafka_handler.recorder
@@ -660,10 +726,13 @@ if __name__ == "__main__":
                 for class_name in details["parameters"]["speed_limit"].keys():
                     user_data.radar_handler.class_calibration_count[class_name] = 0
                     user_data.radar_handler.is_calibrating[class_name]=True
+                    user_data.calibration_required[class_name]=0
                 
                 for class_name, limit in details["parameters"]["speed_limit"].items():
                     # Calibrate using your logic; here's an example:
                     user_data.calibrate_class_wise[class_name] = details["parameters"]["calibration"]
+                    user_data.calibrate_history[class_name]=deque(maxlen=7)
+
                 user_data.calibrate_speed["speed"] = None
                 user_data.calibrate_speed["class_name"] = None
                 user_data.calibrate_speed["radar"] = None

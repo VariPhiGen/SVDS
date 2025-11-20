@@ -396,7 +396,9 @@ class user_app_callback_class(app_callback_class):
                             #print( speed,(self.time_stamp[-1] - self.traffic_overspeeding_distancewise_data[tracker_id]["entry_time"]),self.calibrate_class_wise[obj_class],distance,total_distance,projected_distance,self.parameters_data["traffic_overspeeding_distancewise"]["lines_length"][lane_name])
                             try:
                                 radar_speed,rank1,radar_normal_status = self.radar_handler.get_radar_data(speed, self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][obj_class],obj_class)
-                                #print("Original AI Speed and Radar Speed", speed, radar_speed)
+                                if radar_speed is not None:
+                                    radar_speed=int(radar_speed*self.parameters_data["traffic_overspeeding_distancewise"]["radar_calibration"])
+                                #print("Original AI Speed and Radar Speed", rank1, speed, radar_speed)
                                 if not radar_normal_status:
                                     break
                                 if radar_speed is None and obj_class in self.calibrated_classes:
@@ -422,15 +424,23 @@ class user_app_callback_class(app_callback_class):
                                     self.calibration_check()
                                     if not self.radar_handler.is_calibrating[obj_class]:
                                         self.calibrated_classes.add(obj_class)
+                                        ai_flag=0
                                 else:
                                     self.calibration_check()
 
                             if obj_class in self.calibrated_classes and ai_flag==1 :
-                                if ((radar_speed is None and time_spent > 0.11) or (radar_speed is not None and abs(speed - radar_speed) < self.radar_maxdiff)):
-
+                                if ((radar_speed is None and time_spent > 0.11) or (radar_speed is not None and abs(speed - radar_speed) <= self.radar_maxdiff)):
                                     #print("Overspeeding Detected", speed,radar_speed)
                                     overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
-        
+                                elif rank1 and time_spent > 0.11 and radar_speed is not None and speed > radar_speed:
+                                    #print("Overspeeding Detected via Rank 1 and Radar",rank1,speed,radar_speed)
+                                    overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+                                elif (radar_speed is not None and time_spent > 0.11) :
+                                    radar_speed=None
+                                    #print("Overspeeding Detected via AI", speed,radar_speed)
+                                    overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+                                
+                        
         for result in overspeeding_result:
             obj_class = result["obj_class"]
             if result["radar_speed"] is not None and 120 >= result["radar_speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]]):
@@ -441,7 +451,7 @@ class user_app_callback_class(app_callback_class):
                 datetimestamp = f"{datetime.now(self.ist_timezone).isoformat()}"
                 self.create_result_overspeeding_events(xywh, obj_class, {"speed": result["radar_speed"],"tag":"RDR"}, datetimestamp, 1, anprimage)
             
-            elif 55 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]])+5 and result["radar_speed"] is None:
+            elif 80 > result["speed"] > (self.parameters_data["traffic_overspeeding_distancewise"]["speed_limit"][result["obj_class"]])+5 and result["radar_speed"] is None:
                 # Get the bounding rectangle of the polygon
                 self.violation_id_data["traffic_overspeeding_distancewise"].append(result["tracker_id"])
                 anprimage = crop_image_numpy(self.image, result["box"])
