@@ -77,6 +77,7 @@
             "truck": 30,
             "motorcycle": 30
           },
+          "sensitivity_mode":"high/low/medium",
           "calibration": 1.3668,
           "radar_calibration": 1,
           "lines": {

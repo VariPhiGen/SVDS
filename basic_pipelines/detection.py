@@ -1,3 +1,17 @@
+# Copyright 2024 Variphi Gen Innovation Private Limited
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from pathlib import Path
 import gi
 gi.require_version('Gst', '1.0')
@@ -171,7 +185,65 @@ class user_app_callback_class(app_callback_class):
         cs["speed"] = cs["radar"] = cs["class_name"] = None
 
         return True
-        
+
+    def save_calibration_json(self):
+        """Save calibration data to JSON file."""
+        try:
+            # Prepare calibration data
+            calibration_data = {
+                "timestamp": datetime.now(self.ist_timezone).isoformat(),
+                "calibrate_class_wise": dict(self.calibrate_class_wise),
+                "calibrate_history": {cls: list(history) for cls, history in self.calibrate_history.items()},
+                "calibrated_classes": list(self.calibrated_classes)
+            }
+
+            # Add min/max ranges if they exist (simple approach for now)
+            calibration_data["calibration_ranges"] = {}
+            for cls in self.calibrate_class_wise.keys():
+                # Default ranges - can be made configurable later
+                calibration_data["calibration_ranges"][cls] = {"min": 0.5, "max": 2.0}
+
+            with open('calibration_results.json', 'w') as f:
+                json.dump(calibration_data, f, indent=2)
+
+            print(f"✅ Calibration data saved to calibration_results.json")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to save calibration data: {e}")
+            return False
+
+    def load_calibration_json(self):
+        """Load calibration data from JSON file and return in original Python types."""
+        try:
+            if os.path.exists('calibration_results.json'):
+                with open('calibration_results.json', 'r') as f:
+                    calibration_data = json.load(f)
+
+                # Convert back to original Python types
+                calibrate_class_wise = dict(calibration_data.get("calibrate_class_wise", {}))
+                calibrate_history = {}
+                for cls, history_list in calibration_data.get("calibrate_history", {}).items():
+                    calibrate_history[cls] = deque(history_list, maxlen=7)
+                calibrated_classes = set(calibration_data.get("calibrated_classes", []))
+                calibration_ranges = dict(calibration_data.get("calibration_ranges", {}))
+
+                print(f"✅ Calibration data loaded from calibration_results.json")
+                print(f"   Loaded classes: {list(calibrated_classes)}")
+
+                return {
+                    "calibrate_class_wise": calibrate_class_wise,
+                    "calibrate_history": calibrate_history,
+                    "calibrated_classes": calibrated_classes,
+                    "calibration_ranges": calibration_ranges,
+                    "timestamp": calibration_data.get("timestamp")
+                }
+            else:
+                print("ℹ️  No calibration file found")
+                return None
+        except Exception as e:
+            print(f"❌ Failed to load calibration data: {e}")
+            return None
+
     def start_asyncio_loop(self):
         asyncio.set_event_loop(self.main_loop)
         self.main_loop.run_forever()
@@ -432,13 +504,13 @@ class user_app_callback_class(app_callback_class):
                                 if ((radar_speed is None and time_spent > 0.11) or (radar_speed is not None and abs(speed - radar_speed) <= self.radar_maxdiff)):
                                     #print("Overspeeding Detected", speed,radar_speed)
                                     overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
-                                elif rank1 and time_spent > 0.11 and radar_speed is not None and speed > radar_speed:
-                                    #print("Overspeeding Detected via Rank 1 and Radar",rank1,speed,radar_speed)
-                                    overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
-                                elif (radar_speed is not None and time_spent > 0.11) :
-                                    radar_speed=None
-                                    #print("Overspeeding Detected via AI", speed,radar_speed)
-                                    overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+                                # elif rank1 and time_spent > 0.11 and radar_speed is not None and speed > radar_speed:
+                                #     #print("Overspeeding Detected via Rank 1 and Radar",rank1,speed,radar_speed)
+                                #     overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
+                                # elif (radar_speed is not None and time_spent > 0.11) :
+                                #     radar_speed=None
+                                #     #print("Overspeeding Detected via AI", speed,radar_speed)
+                                #     overspeeding_result.append({"tracker_id": tracker_id, "box": box, "speed": speed, "radar_speed": radar_speed, "lane_name": lane_name, "obj_class": obj_class})
                                 
                         
         for result in overspeeding_result:
