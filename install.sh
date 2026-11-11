@@ -315,6 +315,26 @@ hailo-post-install \
     --config "$CONFIG_PATH" \
     --group "$DOWNLOAD_ALL"
 
+###——— YOLO POST-PROCESS FALLBACK ————————————————————————————————————————
+# hailo-apps' C++ post-processes don't compile against TAPPAS 5.x headers
+# (HailoTensor::vstream_info was removed), so hailo-post-install can leave
+# libyolo_hailortpp_postprocess.so missing and detection.py segfaults.
+# TAPPAS ships the same YOLO post-process (same filter_letterbox entry point).
+echo
+echo "🔗 Checking YOLO post-process library…"
+SO_DIR="$(readlink -f resources 2>/dev/null || echo /usr/local/hailo/resources)/so"
+YOLO_SO="$SO_DIR/libyolo_hailortpp_postprocess.so"
+TAPPAS_YOLO_SO="/usr/lib/$(uname -m)-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so"
+if [[ -e "$YOLO_SO" ]]; then
+  echo "✅ $YOLO_SO present"
+elif [[ -f "$TAPPAS_YOLO_SO" ]]; then
+  mkdir -p "$SO_DIR" 2>/dev/null || sudo mkdir -p "$SO_DIR"
+  ln -sf "$TAPPAS_YOLO_SO" "$YOLO_SO" 2>/dev/null || sudo ln -sf "$TAPPAS_YOLO_SO" "$YOLO_SO"
+  echo "✅ Linked $YOLO_SO -> $TAPPAS_YOLO_SO"
+else
+  echo "⚠️  $YOLO_SO missing and TAPPAS YOLO post-process not found; detection will fail (see HAILO_RECOVERY.md section H)"
+fi
+
 
 ###——— FINISHED —————————————————————————————————————————————————————
 cat <<EOF

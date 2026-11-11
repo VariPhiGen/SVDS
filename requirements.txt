@@ -8,7 +8,8 @@ python-dotenv
 PyGObject>=3.36.0
 
 # Kafka & Streaming (for kafka_handler.py)
-kafka-python>=2.0.0
+# <3.0.0: kafka-python 3.x removed kafka.errors.NoBrokersAvailable, which kafka_handler.py imports
+kafka-python>=2.0.0,<3.0.0
 
 # AWS & Cloud Storage (for kafka_handler.py)
 boto3>=1.20.0
