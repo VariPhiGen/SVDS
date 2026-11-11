@@ -111,4 +111,7 @@ tmp/
 *.gif
 videos/
 photos/
-gifs/ 
+gifs/
+/resources
+gstshark_*/
+hailort.log
