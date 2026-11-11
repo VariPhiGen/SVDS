@@ -85,6 +85,25 @@ sudo dpkg-reconfigure hailort-pcie-driver
 
 The package's install script registers the driver with DKMS, so it is rebuilt automatically for every new kernel.
 
+If `dpkg-reconfigure` prints `Failed. Exited with status 1` and `/usr/src/hailort-pcie-driver` does not exist, the package's files are gone. Confirm with `dpkg -V hailort-pcie-driver`; on the second Pi the firmware in `/lib/firmware/hailo` was missing too. The package's own remove script deletes both folders (`rm -rf`), and both its remove and install scripts `cd` into the source folder, so a plain `apt install --reinstall` fails too.
+
+First put the package's own files back from the `.deb`, then reinstall; the reinstall also builds through DKMS:
+
+```bash
+sudo apt install --download-only --reinstall -y hailort-pcie-driver
+mkdir -p ~/hailo_deb && dpkg-deb -x /var/cache/apt/archives/hailort-pcie-driver_4.23.0_all.deb ~/hailo_deb
+sudo cp -a ~/hailo_deb/usr/src/hailort-pcie-driver /usr/src/
+sudo mkdir -p /lib/firmware/hailo && sudo cp -a ~/hailo_deb/lib/firmware/hailo/. /lib/firmware/hailo/
+dpkg -V hailort-pcie-driver        # should now print nothing
+sudo apt install --reinstall -y hailort-pcie-driver
+```
+```bash
+dkms status
+modinfo -F vermagic hailo_pci
+```
+
+Expected: `hailo_pci/4.23.0, <kernel>, aarch64: installed`, and a vermagic matching `uname -r`. Then reboot.
+
 ## E. Hailo-8 or Hailo-8L: pick the right models
 
 `lspci` shows "Hailo-8" for **both** chips, because they share PCI ID `1e60:2864`. To see which one you have:
@@ -158,7 +177,7 @@ This covers YOLO detection only. The pose, segmentation, depth and face (scrfd) 
 2. `sudo ./hailo_doctor.sh`, then fix whatever it flags (usually section A, then reboot)
 3. Section D (DKMS)
 4. Section E (models and `configuration.json`)
-5. Sections G and H (the kafka-python pin and the YOLO post-process symlink); both were needed on the first Pi
+5. Sections G and H (the kafka-python pin and the YOLO post-process symlink) are handled by `./install.sh` from this commit on. On a Pi installed earlier, run `git pull && ./install.sh` again, or apply them by hand
 6. Test on a file before using RTSP:
    ```bash
    source setup_env.sh && python basic_pipelines/detection.py --input resources/videos/example.mp4 --disable-sync --disable-display

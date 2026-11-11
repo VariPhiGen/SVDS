@@ -21,7 +21,7 @@ if [ -z "$DEV" ]; then
     fix "power off, reseat M.2 card / ribbon cable; check 'dtparam=pciex1' in /boot/firmware/config.txt"
     exit 1
 fi
-ok "Hailo at $DEV: $(lspci -s $DEV | cut -d: -f3-)"
+ok "Hailo at $DEV: $(lspci -s $DEV | cut -d' ' -f2-)"
 UP=$(basename "$(dirname "$(readlink -f /sys/bus/pci/devices/$DEV)")")
 LNK=$(lspci -vvv -s $DEV | grep -m1 "LnkSta:" | sed 's/^\s*//')
 echo "         link: $LNK   (config.txt: $(grep -E '^(pcie_gen3|dtparam=pciex1_gen)' /boot/firmware/config.txt | tr '\n' ' '))"
@@ -70,7 +70,7 @@ AER=$(lspci -vvv -s $DEV | grep -m1 "UESta:" | grep -oE "[A-Za-z]+\+" | tr '\n' 
 
 echo "5. Firmware / runtime"
 cd /tmp
-ID=$(timeout 15 hailortcli fw-control identify 2>&1)
+ID=$(timeout 15 hailortcli fw-control identify 2>&1 | tr -d '\000')
 if echo "$ID" | grep -q "Firmware Version"; then
     ok "$(echo "$ID" | grep -m1 'Firmware Version' | sed 's/^\s*//')"
     ARCH=$(echo "$ID" | grep -m1 "Device Architecture" | awk '{print $3}')
