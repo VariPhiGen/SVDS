@@ -77,8 +77,8 @@ class RadarHandler:
             if self.ser:
                 self.ser.close()
             
-            self.ser = serial.Serial(
-                port=self.radar_port,
+            self.ser = serial.serial_for_url(
+                self.radar_port,
                 baudrate=self.radar_baudrate,
                 timeout=0.02,
                 bytesize=serial.EIGHTBITS,

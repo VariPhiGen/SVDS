@@ -29,7 +29,7 @@ import statistics
 from kafka_handler import KafkaHandler
 from radar_handler import RadarHandler
 from helper_utils import (
-    setup_logging, throttle_gst_warnings, encode_frame_to_bytes, is_vehicle_in_zone, crop_image_numpy,
+    setup_logging, throttle_gst_warnings, add_radar_overlay, RADAR_OVERLAY_NAME, encode_frame_to_bytes, is_vehicle_in_zone, crop_image_numpy,
     closest_line_projected_distance, get_unique_tracker_ids, calculate_distance
 )
 
@@ -37,6 +37,12 @@ from helper_utils import (
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
+
+
+class SVDSDetectionApp(GStreamerDetectionApp):
+    """hailo-apps detection pipeline plus a radar text overlay on the display."""
+    def get_pipeline_string(self):
+        return add_radar_overlay(super().get_pipeline_string())
 
 
 
@@ -506,6 +512,13 @@ def app_callback(pad, info, user_data,frame_type):
             
         # Get the detections from the buffer
         roi = hailo.get_roi_from_buffer(buffer)
+        # Radar reading in the top-right corner of the display
+        radar_overlay = getattr(user_data, 'radar_overlay', None)
+        if radar_overlay is not None and user_data.radar_handler.radar_port:
+            text = user_data.radar_handler.display_text()
+            if text != getattr(user_data, 'radar_overlay_text', None):
+                radar_overlay.set_property("text", text)
+                user_data.radar_overlay_text = text
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
         #user_data.time_stamp.append(tr)
@@ -661,6 +674,7 @@ if __name__ == "__main__":
         try:
             radar_config = config["radar_config"]
             user_data.radar_maxdiff=radar_config.get("max_diff_rais", 15)
+            user_data.radar_handler.print_readings = bool(radar_config.get("print_readings", True))
             user_data.radar_handler.init_radar(
                 port=radar_config.get("port", "/dev/ttyACM0"),
                 baudrate=radar_config.get("baudrate", 9600),
@@ -768,7 +782,8 @@ if __name__ == "__main__":
 
     user_data.active_methods=active_methods
     
-    app = GStreamerDetectionApp(app_callback, user_data)
+    app = SVDSDetectionApp(app_callback, user_data)
+    user_data.radar_overlay = app.pipeline.get_by_name(RADAR_OVERLAY_NAME) if app.pipeline else None
     
     try:
         print("🚀 Starting SVDS detection system...")

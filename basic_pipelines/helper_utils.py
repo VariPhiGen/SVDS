@@ -12,6 +12,21 @@ def setup_logging():
     pass
 
 
+RADAR_OVERLAY_NAME = "radar_overlay"
+
+
+def add_radar_overlay(pipeline_string: str) -> str:
+    """Insert a GStreamer textoverlay just before the display sink, so the
+    radar reading can be shown in the top-right corner of the video.
+    The text is set at runtime via the element named RADAR_OVERLAY_NAME."""
+    sink = "fpsdisplaysink name=hailo_display"
+    if sink not in pipeline_string:
+        return pipeline_string
+    overlay = (f'textoverlay name={RADAR_OVERLAY_NAME} text="" valignment=top halignment=right '
+               'font-desc="Sans Bold 18" shaded-background=true ! ')
+    return pipeline_string.replace(sink, overlay + sink, 1)
+
+
 def throttle_gst_warnings(interval: float = 10.0) -> None:
     """Print GStreamer's per-frame 'write map requested on non-writable buffer'
     CRITICAL at most once per `interval` seconds, with a count of hidden repeats.

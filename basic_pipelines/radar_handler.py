@@ -37,6 +37,10 @@ class RadarHandler:
         self.max_reconnect_attempts = 3  # Maximum reconnection attempts
         self.reconnect_attempts = 0
         self.is_connected = False
+
+        # Latest decoded reading, for the terminal print and the display overlay
+        self.last_reading = None  # (time, raw_kmh, direction)
+        self.print_readings = True  # radar_config.print_readings in configuration.json
         
     def init_radar(self, port: str, baudrate: int = 9600, max_age=10, max_diff_rais=15, calibration_required=2):
         """
@@ -80,8 +84,8 @@ class RadarHandler:
             if self.ser:
                 self.ser.close()
             
-            self.ser = serial.Serial(
-                port=self.radar_port,
+            self.ser = serial.serial_for_url(
+                self.radar_port,
                 baudrate=self.radar_baudrate,
                 timeout=0.02,
                 bytesize=serial.EIGHTBITS,
@@ -183,6 +187,7 @@ class RadarHandler:
                         speed_kmh = speed_raw
                         direction = 'Approaching'
                         return {
+                            'raw_speed': speed_raw,
                             'speed': speed_kmh,
                             'direction': direction,
                             'type': 'Primary Target'
@@ -191,6 +196,7 @@ class RadarHandler:
                         speed_kmh = 0
                         direction = 'Approaching'
                         return {
+                            'raw_speed': speed_raw,
                             'speed': speed_kmh,
                             'direction': direction,
                             'type': 'Primary Target'
@@ -204,6 +210,7 @@ class RadarHandler:
                         direction = 'Receding'
                         
                         return {
+                            'raw_speed': speed_raw,
                             'speed': speed_kmh,
                             'direction': direction,
                             'type': 'Leading Target'
@@ -271,10 +278,10 @@ class RadarHandler:
 
             # Try reading radar speed
             speed_data = self.get_speed()
-            #print(speed_data)
             if speed_data is None:
                 time.sleep(0.05)  # small delay to prevent busy loop
                 continue
+            self._record_reading(speed_data)
 
             speed = speed_data['speed']
             direction = speed_data['direction']
@@ -310,6 +317,25 @@ class RadarHandler:
                     else:
                         self.abnormal_count=0
         
+    def _record_reading(self, speed_data):
+        """Keep the latest non-zero reading and print it to the terminal."""
+        raw = speed_data.get('raw_speed', speed_data['speed'])
+        if not raw:
+            return
+        self.last_reading = (time.time(), raw, speed_data['direction'])
+        if self.print_readings:
+            note = "  (below 20 km/h, not used for speed checks)" if speed_data['speed'] == 0 else ""
+            print(f"RADAR {time.strftime('%H:%M:%S')}  {raw:3d} km/h  {speed_data['direction']}{note}", flush=True)
+
+    def display_text(self, max_age: float = 2.0) -> str:
+        """Short text for the video overlay (the display frame is 640 px wide)."""
+        if not self.is_connected:
+            return "Radar: offline"
+        if not self.last_reading or time.time() - self.last_reading[0] > max_age:
+            return "Radar: --"
+        _, raw, direction = self.last_reading
+        return f"Radar: {raw} km/h" + (" (R)" if direction == 'Receding' else "")
+
     def get_radar_data(self, ai_speed,threshold, obj_class):
         """
         Optimized radar speed matching with early exit and cleaner logic
