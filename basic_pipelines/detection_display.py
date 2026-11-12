@@ -593,7 +593,7 @@ if __name__ == "__main__":
     os.environ["HAILO_ENV_FILE"] = env_path_str
     # Logging is disabled - all errors sent to Kafka
     setup_logging()
-    throttle_gst_warnings()  # hailofilter's per-frame non-writable warning -> once per second
+    throttle_gst_warnings()  # hailofilter's per-frame non-writable warning -> once every 10 s
 
     # Register cleanup on exit
     atexit.register(cleanup_resources)

@@ -12,7 +12,7 @@ def setup_logging():
     pass
 
 
-def throttle_gst_warnings(interval: float = 1.0) -> None:
+def throttle_gst_warnings(interval: float = 10.0) -> None:
     """Print GStreamer's per-frame 'write map requested on non-writable buffer'
     CRITICAL at most once per `interval` seconds, with a count of hidden repeats.
 
