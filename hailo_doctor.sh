@@ -30,7 +30,11 @@ echo "2. Kernel module matches running kernel"
 MODVER=$(modinfo -F vermagic hailo_pci 2>/dev/null | awk '{print $1}')
 if [ -z "$MODVER" ]; then
     bad "hailo_pci module not installed for $KREL"
-    fix "see HAILO_RECOVERY.md section A (rebuild driver)"
+    if dpkg -V hailort-pcie-driver 2>/dev/null | grep -q '^missing'; then
+        fix "hailort-pcie-driver files are missing - see HAILO_RECOVERY.md section D"
+    else
+        fix "see HAILO_RECOVERY.md section A (rebuild driver)"
+    fi
 elif [ "$MODVER" != "$KREL" ]; then
     bad "hailo_pci built for $MODVER, running $KREL"
     fix "see HAILO_RECOVERY.md section A (rebuild driver)"

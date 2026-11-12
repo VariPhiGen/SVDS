@@ -85,7 +85,11 @@ sudo dpkg-reconfigure hailort-pcie-driver
 
 The package's install script registers the driver with DKMS, so it is rebuilt automatically for every new kernel.
 
+`./install.sh` now does all of this automatically: it installs `dkms`, restores missing package files as below, reinstalls the driver if needed, and tells you to reboot.
+
 If `dpkg-reconfigure` prints `Failed. Exited with status 1` and `/usr/src/hailort-pcie-driver` does not exist, the package's files are gone. Confirm with `dpkg -V hailort-pcie-driver`; on the second Pi the firmware in `/lib/firmware/hailo` was missing too. The package's own remove script deletes both folders (`rm -rf`), and both its remove and install scripts `cd` into the source folder, so a plain `apt install --reinstall` fails too.
+
+Typical signs: `/var/log/hailort-pcie-driver.deb.log` shows `pushd: /usr/src/hailort-pcie-driver/linux/pcie: No such file or directory`, and `hailo_doctor.sh` goes from `[OK]` to `[FAIL] hailo_pci module not installed`, because the install script ran `make uninstall` before it failed.
 
 First put the package's own files back from the `.deb`, then reinstall; the reinstall also builds through DKMS:
 
@@ -102,7 +106,7 @@ dkms status
 modinfo -F vermagic hailo_pci
 ```
 
-Expected: `hailo_pci/4.23.0, <kernel>, aarch64: installed`, and a vermagic matching `uname -r`. Then reboot.
+Expected: `hailo_pci/4.23.0, <kernel>, aarch64: installed`, and a vermagic matching `uname -r`. Then reboot. Change `4.23.0` if `dpkg-query -W hailort-pcie-driver` shows a different version.
 
 ## E. Hailo-8 or Hailo-8L: pick the right models
 
@@ -175,7 +179,7 @@ This covers YOLO detection only. The pose, segmentation, depth and face (scrfd) 
 
 1. `source setup_system.sh` and `./install.sh`
 2. `sudo ./hailo_doctor.sh`, then fix whatever it flags (usually section A, then reboot)
-3. Section D (DKMS)
+3. Section D (DKMS). `install.sh` already does this; if it reported a driver reinstall, reboot and rerun the doctor script
 4. Section E (models and `configuration.json`)
 5. Sections G and H (the kafka-python pin and the YOLO post-process symlink) are handled by `./install.sh` from this commit on. On a Pi installed earlier, run `git pull && ./install.sh` again, or apply them by hand
 6. Test on a file before using RTSP:

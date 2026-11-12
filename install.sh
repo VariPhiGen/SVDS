@@ -214,6 +214,73 @@ if [[ -n "$PYTAPPAS_PATH" ]]; then
   INSTALL_TAPPAS_CORE=true
 fi
 
+###——— HAILO PCIe DRIVER (DKMS + missing-file repair) ————————————————————
+# See HAILO_RECOVERY.md section D. If the package's files under /usr/src or
+# /lib/firmware/hailo are missing, its postinst runs `make uninstall` and then
+# fails at `pushd`, leaving no hailo_pci module. Restore the files from the
+# .deb first, then reinstall so the postinst registers the driver with DKMS.
+NEED_REBOOT=false
+ensure_hailo_pcie_driver() {
+  local pkg=hailort-pcie-driver
+  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+    echo "⚠️  $pkg not installed; skipping driver check."
+    return 0
+  fi
+
+  local reinstall=false
+  if ! command -v dkms >/dev/null 2>&1; then
+    echo "📦 Installing dkms so the Hailo driver is rebuilt on kernel updates…"
+    sudo apt install -y dkms
+    reinstall=true
+  fi
+
+  if [[ ! -d /usr/src/hailort-pcie-driver/linux/pcie ]] \
+     || dpkg -V "$pkg" 2>/dev/null | grep -q '^missing'; then
+    echo "🔧 $pkg files are missing; restoring them from the .deb…"
+    local ver deb tmp
+    ver=$(dpkg-query -W -f='${Version}' "$pkg")
+    sudo apt install --download-only --reinstall -y "$pkg"
+    deb=$(ls /var/cache/apt/archives/${pkg}_*"${ver#*:}"*_all.deb 2>/dev/null | head -n1)
+    if [[ -z "$deb" ]]; then
+      echo "❌ Could not find the downloaded $pkg $ver .deb in /var/cache/apt/archives."
+      exit 1
+    fi
+    tmp=$(mktemp -d)
+    dpkg-deb -x "$deb" "$tmp"
+    sudo cp -a "$tmp/usr/src/hailort-pcie-driver" /usr/src/
+    sudo mkdir -p /lib/firmware/hailo
+    sudo cp -a "$tmp/lib/firmware/hailo/." /lib/firmware/hailo/
+    rm -rf "$tmp"
+    if dpkg -V "$pkg" 2>/dev/null | grep -q '^missing'; then
+      echo "❌ $pkg still has missing files after restore:"
+      dpkg -V "$pkg" | grep '^missing'
+      exit 1
+    fi
+    reinstall=true
+  fi
+
+  if ! modinfo -k "$(uname -r)" hailo_pci >/dev/null 2>&1; then
+    echo "⚠️  hailo_pci module not installed for $(uname -r)."
+    reinstall=true
+  fi
+
+  if $reinstall; then
+    echo "📦 Reinstalling $pkg (builds hailo_pci via DKMS)…"
+    sudo apt install --reinstall -y "$pkg"
+    NEED_REBOOT=true
+  else
+    echo "✅ $pkg intact, dkms present, hailo_pci built for $(uname -r)"
+  fi
+}
+
+echo
+echo "📋 Checking Hailo PCIe driver…"
+if [[ "$NO_INSTALLATION" == true ]]; then
+  echo "⚠️  Skipping driver check due to --no-installation flag."
+else
+  ensure_hailo_pcie_driver
+fi
+
 sudo apt install python3-gi python3-gi-cairo
 
 
@@ -345,3 +412,9 @@ To setup your environment:
     source setup_env.sh
 
 EOF
+
+if [[ "$NEED_REBOOT" == true ]]; then
+  echo "🔁 The Hailo driver was (re)installed. Reboot before using the Hailo:"
+  echo "    sudo reboot"
+  echo "   Then check it with: sudo ./hailo_doctor.sh"
+fi
