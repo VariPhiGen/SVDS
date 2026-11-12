@@ -12,6 +12,43 @@ def setup_logging():
     pass
 
 
+def throttle_gst_warnings(interval: float = 1.0) -> None:
+    """Print GStreamer's per-frame 'write map requested on non-writable buffer'
+    CRITICAL at most once per `interval` seconds, with a count of hidden repeats.
+
+    hailofilter asks for write access to every frame, but hailocropper shares
+    the frame with its bypass branch, so GStreamer refuses and logs a CRITICAL
+    per frame. Detections are unaffected (HAILO_RECOVERY.md section I).
+    Every other GStreamer CRITICAL is still printed normally.
+    """
+    import sys
+    import threading
+    import time
+    import gi
+    gi.require_version('Gst', '1.0')
+    from gi.repository import GLib
+
+    noisy = "write map requested on non-writable buffer"
+    lock = threading.Lock()
+    state = {"last": 0.0, "hidden": 0}
+
+    def handler(domain, level, message, *user_data):
+        if noisy not in (message or ""):
+            GLib.log_default_handler(domain, level, message)
+            return
+        with lock:
+            now = time.monotonic()
+            if now - state["last"] < interval:
+                state["hidden"] += 1
+                return
+            hidden, state["hidden"], state["last"] = state["hidden"], 0, now
+        extra = f" (+{hidden} repeats hidden)" if hidden else ""
+        print(f"GStreamer-CRITICAL: {noisy}{extra} - harmless, see HAILO_RECOVERY.md section I",
+              file=sys.stderr, flush=True)
+
+    GLib.log_set_handler("GStreamer", GLib.LogLevelFlags.LEVEL_CRITICAL, handler, None)
+
+
 def serialize_image(image: np.ndarray) -> str:
     """
     Serialize image to base64 string.

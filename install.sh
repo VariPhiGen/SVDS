@@ -382,6 +382,13 @@ hailo-post-install \
     --config "$CONFIG_PATH" \
     --group "$DOWNLOAD_ALL"
 
+###——— RTSP SOURCE FIX (Pi 5 hardware H.265 decoder) ——————————————————————
+# hailo-apps' RTSP pipeline can't negotiate the Pi 5 decoder's NV12_128C8
+# output to I420, so RTSP input fails. See HAILO_RECOVERY.md section J.
+echo
+echo "🔧 Patching hailo-apps RTSP source pipeline…"
+./fix_rtsp_pipeline.sh || echo "⚠️  RTSP fix not applied; RTSP input may fail (see HAILO_RECOVERY.md section J)"
+
 ###——— YOLO POST-PROCESS FALLBACK ————————————————————————————————————————
 # hailo-apps' C++ post-processes don't compile against TAPPAS 5.x headers
 # (HailoTensor::vstream_info was removed), so hailo-post-install can leave

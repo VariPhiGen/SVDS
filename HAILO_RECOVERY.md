@@ -173,7 +173,39 @@ This covers YOLO detection only. The pose, segmentation, depth and face (scrfd) 
   It loops the file. Expect about 54 FPS with yolov11s on a Hailo-8L.
 - **Unconfigured Kafka and a missing radar are not fatal.** They log `NoBrokersAvailable` and `could not open port /dev/ttyACMr` and retry.
 - **Stopping:** the app may ignore SIGTERM. Ctrl+C works interactively; otherwise use `pkill -9 -f detection.py`.
-- **Without `PYTHONUNBUFFERED=1`**, SVDS's own output is buffered and you only see GStreamer warnings. The `write map requested on non-writable buffer` warnings are harmless.
+- **Without `PYTHONUNBUFFERED=1`**, SVDS's own output is buffered and you only see GStreamer warnings.
+- **`GStreamer-CRITICAL: write map requested on non-writable buffer` is harmless.** It comes from `hailofilter` (the YOLO post-process step), once per frame. `hailofilter` asks for write access to every frame, but `hailocropper` shares the frame with its bypass branch to `hailoaggregator`, so GStreamer refuses and prints this. The YOLO post-process only reads the Hailo output tensors, never the pixels, so detections are unaffected (checked on 2026-11-12 by removing elements one by one with `gst-launch-1.0`, and by saving annotated frames). `hailofilter` has no property to turn it off. `detection.py` and `detection_display.py` call `throttle_gst_warnings()` from `helper_utils.py`, so it prints at most once per second with a `(+N repeats hidden)` count. Any **other** `GStreamer-CRITICAL` is still printed in full and should be looked at.
+
+## J. RTSP camera: detection fails to start, file input works
+
+**Symptoms:** `detection.py --input "rtsp://..."` exits or never shows FPS lines, even though the camera plays in `ffprobe`/VLC. Files work.
+
+**Cause:** hailo-apps builds the RTSP source as `rtspsrc ! rtph265depay ! h265parse ! decodebin ! ... ! video/x-raw, format=I420`. On a Pi 5, `decodebin` picks the hardware decoder `v4l2slh265dec`, which outputs `NV12_128C8`. That cannot negotiate to `I420`, so the pipeline fails and `rtspsrc` reports `Could not send message`.
+
+**Fix:** add `videoconvert` after `decodebin`. `./install.sh` does this automatically; on an existing install run:
+
+```bash
+cd ~/SVDS && git pull && ./fix_rtsp_pipeline.sh
+```
+
+It edits `gstreamer_helper_pipelines.py` inside the venv's `hailo_apps` package, keeps a `.orig` backup, and is safe to run again. Rerun it after anything that reinstalls hailo-apps (`pip install`, `./install.sh` does it for you).
+
+**Checks:**
+
+1. The camera sends H.265. The pipeline only accepts H.265, so `codec_name` must be `hevc`; if it is `h264`, change the camera's video encoding to H.265 in its web page:
+   ```bash
+   ffprobe -v error -rtsp_transport tcp -select_streams v:0 -show_entries stream=codec_name,width,height,avg_frame_rate -of default=nw=1 "RTSP_URL"
+   ```
+2. Whether this Pi needs the fix: `NV12_128C8` in the output means yes.
+   ```bash
+   cd /tmp && gst-launch-1.0 -v rtspsrc location="RTSP_URL" ! rtph265depay ! h265parse ! decodebin ! fakesink num-buffers=30 2>&1 | grep -oE 'decodebin0/[a-z0-9_]+|NV12_128C8' | sort -u
+   ```
+3. Run detection. Expect FPS close to the camera's frame rate (15 on the first test camera) with `Droprate: 0.00`:
+   ```bash
+   cd ~/SVDS && source setup_env.sh && PYTHONUNBUFFERED=1 python basic_pipelines/detection.py --input "RTSP_URL" --disable-sync --disable-display --show-fps
+   ```
+
+**URL tips:** always put the URL in double quotes (`&` breaks the command otherwise). Encode special characters in the password: `@` as `%40`, `#` as `%23`, `:` as `%3A`, `/` as `%2F`. Dahua-style cameras use `/cam/realmonitor?channel=1&subtype=0` (`subtype=1` is the lighter sub-stream); Hikvision uses `/Streaming/Channels/101`. For `./run_detection.sh`, put the URL in `camera_details.RTSP_URL` in `configuration.json`.
 
 ## Order of operations on a fresh Pi
 
@@ -182,7 +214,9 @@ This covers YOLO detection only. The pose, segmentation, depth and face (scrfd) 
 3. Section D (DKMS). `install.sh` already does this; if it reported a driver reinstall, reboot and rerun the doctor script
 4. Section E (models and `configuration.json`)
 5. Sections G and H (the kafka-python pin and the YOLO post-process symlink) are handled by `./install.sh` from this commit on. On a Pi installed earlier, run `git pull && ./install.sh` again, or apply them by hand
+   The RTSP fix (section J) is also applied by `./install.sh`; on an older install run `./fix_rtsp_pipeline.sh`
 6. Test on a file before using RTSP:
    ```bash
    source setup_env.sh && python basic_pipelines/detection.py --input resources/videos/example.mp4 --disable-sync --disable-display
    ```
+7. Then test the camera (section J, checks 1 and 3)

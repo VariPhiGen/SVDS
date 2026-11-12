@@ -43,7 +43,7 @@ import statistics
 from kafka_handler import KafkaHandler
 from radar_handler import RadarHandler
 from helper_utils import (
-    setup_logging, encode_frame_to_bytes, is_vehicle_in_zone, crop_image_numpy,
+    setup_logging, throttle_gst_warnings, encode_frame_to_bytes, is_vehicle_in_zone, crop_image_numpy,
     closest_line_projected_distance, get_unique_tracker_ids, calculate_distance
 )
 
@@ -665,6 +665,7 @@ if __name__ == "__main__":
     os.environ["HAILO_ENV_FILE"] = env_path_str
     # Logging is disabled - all errors sent to Kafka
     setup_logging()
+    throttle_gst_warnings()  # hailofilter's per-frame non-writable warning -> once per second
 
     # Register cleanup on exit
     atexit.register(cleanup_resources)
